@@ -1,0 +1,8 @@
+﻿*.xlsx
+*.png
+*.csv
+*.json
+*.log
+raw/
+__pycache__/
+state/

@@ -1,0 +1,11 @@
+# 서울 리전 VM cron (시스템 TZ=Asia/Seoul 가정). 설치: crontab crontab.txt
+# 늦게 뜨는 TIGER·금요일 주간을 위해 오전~오후 몇 차례 재시도(멱등이라 안전).
+# 경로는 실제 배포 경로로 바꿀 것.
+
+7 0 * * 1-5  cd /app && /usr/bin/python3 cloud/run_daily.py >> /app/state/run.log 2>&1
+0 8 * * 1-5  cd /app && /usr/bin/python3 cloud/run_daily.py >> /app/state/run.log 2>&1
+0 9 * * 1-5  cd /app && /usr/bin/python3 cloud/run_daily.py >> /app/state/run.log 2>&1
+0 16 * * 1-5 cd /app && /usr/bin/python3 cloud/run_daily.py >> /app/state/run.log 2>&1
+
+# Docker로 돌릴 경우(위 대신):
+# 7 0 * * 1-5 docker run --rm -v /home/ubuntu/etf/state:/app/state -v /home/ubuntu/etf/rclone:/root/.config/rclone etf-daily

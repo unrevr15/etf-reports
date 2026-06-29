@@ -1,0 +1,47 @@
+name: ETF PDF 변화 일일 자동
+
+# 스케줄은 UTC 기준 (한국=UTC+9). 평일/휴장 판단은 스크립트가 알아서 함.
+#   UTC 21,22,23 → KST 06,07,08 / UTC 0,1 → KST 09,10 / UTC 7 → KST 16(늦게 뜨는 TIGER)
+on:
+  schedule:
+    - cron: "0 21,22,23 * * *"
+    - cron: "0 0,1 * * *"
+    - cron: "0 7 * * *"
+  workflow_dispatch: {}   # 수동 실행 버튼
+
+concurrency:
+  group: etf-daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 시스템 패키지(한글폰트·rclone)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends fonts-nanum rclone
+          sudo fc-cache -f
+
+      - name: 파이썬 라이브러리
+        run: pip install -r cloud/requirements.txt
+
+      - name: rclone 설정(시크릿 → 파일)
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+
+      - name: 실행(생성 + Drive 업로드)
+        env:
+          TZ: Asia/Seoul
+          RCLONE_REMOTE: ${{ vars.RCLONE_REMOTE || 'gdrive:etf_reports' }}
+        run: python cloud/run_daily.py
