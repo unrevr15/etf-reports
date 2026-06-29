@@ -9,6 +9,9 @@ on:
     - cron: "0 7 * * *"
   workflow_dispatch: {}   # 수동 실행 버튼
 
+permissions:
+  contents: write          # 리포트를 레포에 커밋하기 위해
+
 concurrency:
   group: etf-daily
   cancel-in-progress: false
@@ -34,14 +37,28 @@ jobs:
       - name: 파이썬 라이브러리
         run: pip install -r cloud/requirements.txt
 
-      - name: rclone 설정(시크릿 → 파일)
+      - name: rclone 설정(시크릿 → 파일, 있을 때만)
         run: |
           mkdir -p ~/.config/rclone
           printf '%s' "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
 
-      - name: 실행(생성 + Drive 업로드)
+      - name: 실행(리포트 생성)
         env:
           TZ: Asia/Seoul
           RCLONE_REMOTE: ${{ vars.RCLONE_REMOTE || 'gdrive:etf_reports' }}
         run: python cloud/run_daily.py
+
+      - name: 리포트를 레포에 커밋 (reports/)
+        run: |
+          mkdir -p reports
+          mv -f pdf_change_*.xlsx pdf_weekly_*.xlsx pdf_rolling*.xlsx portfolio_*.png reports/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f reports/
+          if git diff --cached --quiet; then
+            echo "변경 없음(휴장/미게시)"
+          else
+            git commit -m "리포트 $(TZ=Asia/Seoul date +%Y-%m-%d_%H%M)"
+            git push
+          fi
