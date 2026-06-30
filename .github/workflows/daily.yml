@@ -47,6 +47,7 @@ jobs:
         env:
           TZ: Asia/Seoul
           RCLONE_REMOTE: ${{ vars.RCLONE_REMOTE || 'gdrive:etf_reports' }}
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}   # 전체매매금액(상장좌수) 계산용
         run: python cloud/run_daily.py
 
       - name: 리포트를 레포에 커밋 (reports/)

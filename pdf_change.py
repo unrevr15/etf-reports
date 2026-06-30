@@ -222,17 +222,60 @@ def fetch_db(code):
     return out, (d or "").replace("-", "")
 
 # ── 등록된 액티브 ETF ──────────────────────────────────────────
+# krx: KRX 단축코드(상장좌수 조회용), cu: 설정단위(CU) 크기 → 전체CU수 = 좌수/cu
 ETFS = [
-    {"name":"KoAct 코스닥액티브","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFU6"},
-    {"name":"KoAct 바이오헬스케어액티브","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFJ9"},
-    {"name":"TIME 코스닥액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"24"},
-    {"name":"TIME K바이오액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"13"},
-    {"name":"PLUS 코스닥150액티브","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399"},
-    {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0"},
-    {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008"},
+    {"name":"KoAct 코스닥액티브","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFU6","krx":"0163Y0","cu":50000},
+    {"name":"KoAct 바이오헬스케어액티브","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFJ9","krx":"462900","cu":50000},
+    {"name":"TIME 코스닥액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"24","krx":"0162Y0","cu":50000},
+    {"name":"TIME K바이오액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"13","krx":"463050","cu":50000},
+    {"name":"PLUS 코스닥150액티브","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399","krx":"0166N0","cu":50000},
+    {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000},
+    {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":20000},
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
     #   fetch_unicorn·fetch_db 함수는 코드에 유지 → 재추가 가능.
 ]
+
+# ── 상장좌수(KRX) → 전체 CU수 계산 ─────────────────────────────
+_SHARES_CACHE = {}
+def _krx_key():
+    k = os.getenv("KRX_API_KEY", "")
+    if k: return k
+    # 로컬: sibling .env 에서 로드 (클라우드는 환경변수/시크릿 사용)
+    envp = r"C:/Users/정호준/Desktop/코스닥 etf 분류/.env"
+    try:
+        for line in open(envp, encoding="utf-8", errors="replace"):
+            if line.strip().startswith("KRX_API_KEY"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+def listed_shares():
+    """{KRX단축코드: 상장좌수} — 최근 영업일. 키 없거나 실패 시 빈 dict(전체금액 생략)."""
+    if _SHARES_CACHE: return _SHARES_CACHE
+    key = _krx_key()
+    if not key: return {}
+    for off in range(1, 8):
+        d = (datetime.now().date() - timedelta(days=off)).strftime("%Y%m%d")
+        try:
+            r = requests.get("http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd",
+                             params={"AUTH_KEY": key, "basDd": d}, timeout=20)
+            items = r.json().get("OutBlock_1", []) if r.status_code == 200 else []
+        except Exception:
+            items = []
+        if items:
+            for it in items:
+                code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
+                try: _SHARES_CACHE[code] = int(str(it.get("LIST_SHRS", "0")).replace(",", "") or 0)
+                except ValueError: pass
+            break
+    return _SHARES_CACHE
+
+def num_cu(e):
+    """ETF의 전체 CU수 = 상장좌수/CU. 좌수 미상이면 0."""
+    sh = listed_shares().get(e.get("krx", ""), 0)
+    cu = e.get("cu", 0)
+    return (sh / cu) if (sh and cu) else 0
 
 def _qp(v):
     """맵 값 → (수량, 종가). 값은 [수량,종가](신형) 또는 숫자(구형) 모두 허용."""
@@ -308,13 +351,17 @@ def run(today=None):
             rows = [r for r in diff(kk[t_ymd], kk[p_ymd])
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
+            nc = num_cu(e)
+            for r in rows:
+                r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell})
             for r in rows:
                 csv_rows.append([e["name"], e["am"], t_ymd, p_ymd, r["구분"], r["종목명"],
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
-                                 (r["변화금액"] if r["변화금액"] is not None else "")])
+                                 (r["변화금액"] if r["변화금액"] is not None else ""),
+                                 (r["전체금액"] if r["전체금액"] is not None else "")])
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
@@ -322,7 +369,7 @@ def run(today=None):
     csv_path = os.path.join(BASE, f"pdf_change_{t_ymd}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화","변화금액(원)"])
+        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)"])
         for r in csv_rows: w.writerow(r)
     xlsx_path = write_excel(groups, today, prev, status_line)
     print(f"\n[{status_line}]  변화 {len(csv_rows)}행 → {os.path.basename(xlsx_path)}")
@@ -374,6 +421,9 @@ def _build_period_groups(first, last):
             rows = [r for r in diff(lm, fm)
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
+            nc = num_cu(e)
+            for r in rows:
+                r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell})
@@ -469,12 +519,12 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
         for c in (6, 7, 8, 9): ws.cell(row, c).fill = SELLHBG
         row += 1
         for c, t in zip((1, 2, 3, 4, 6, 7, 8, 9),
-                        ("종목명", "변화(주)", "변화금액(원)", "전일→당일", "종목명", "변화(주)", "변화금액(원)", "전일→당일")):
+                        ("종목명", "변화(1CU주)", "전체매매금액(원)", "전일→당일", "종목명", "변화(1CU주)", "전체매매금액(원)", "전일→당일")):
             cell = ws.cell(row, c, t); cell.font = Font(bold=True, size=9, color="595959")
             cell.alignment = Alignment(horizontal="center"); cell.border = border
         row += 1
         def put(r0, base, fnt, bg):
-            nm = r0["종목명"]; pq = int(r0["전일수량"]); tq = int(r0["당일수량"]); amt = r0["변화금액"]
+            nm = r0["종목명"]; pq = int(r0["전일수량"]); tq = int(r0["당일수량"]); amt = r0.get("전체금액")
             tag = "  (신규)" if r0["구분"] == "신규편입" else ("  (편출)" if r0["구분"] == "편출" else "")
             ws.cell(row, base, nm + tag).font = fnt
             cc = ws.cell(row, base + 1, int(r0["변화"])); cc.number_format = NUMFMT_UP; cc.font = fnt; cc.fill = bg; cc.alignment = Alignment(horizontal="right")
