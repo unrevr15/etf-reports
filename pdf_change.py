@@ -51,8 +51,12 @@ def fetch_samsungactive(prod_id, ymd):
     for it in d.get("list", []):
         nm = (it.get("secNm") or "").strip()
         if not nm or any(s in nm for s in SKIP): continue
-        try: out[nm] = out.get(nm, 0.0) + float(str(it.get("applyQ", "0")).replace(",", ""))
-        except ValueError: pass
+        try:
+            q = float(str(it.get("applyQ", "0")).replace(",", ""))
+            ev = float(str(it.get("evalA", "0")).replace(",", ""))
+        except ValueError: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if q else None)]
     return out, str(d.get("gijunYMD", "")).replace(".", "")
 
 # ── fetcher: 타임폴리오(TIME) pdf_excel.php (pdfDate 날짜 파라미터) → {종목:수량}, 기준일 ──
@@ -73,12 +77,17 @@ def fetch_time(idx, ymd):
             i_nm, i_q = hdr.index("종목명"), hdr.index("수량")
         except ValueError:
             return {}, ""
+        i_ev = next((j for j, c in enumerate(hdr) if "평가금액" in c), None)
         for row in rows[1:]:
             if not row or len(row) <= max(i_nm, i_q): continue
             nm = str(row[i_nm]).strip() if row[i_nm] else ""
             if not nm or any(s in nm for s in SKIP): continue
-            try: out[nm] = out.get(nm, 0.0) + float(str(row[i_q]).replace(",", ""))
-            except (ValueError, TypeError): pass
+            try:
+                q = float(str(row[i_q]).replace(",", ""))
+                ev = float(str(row[i_ev]).replace(",", "")) if i_ev is not None and row[i_ev] is not None else 0.0
+            except (ValueError, TypeError): continue
+            if nm in out: out[nm][0] += q
+            else: out[nm] = [q, (ev / q if (q and ev) else None)]
     return out, (ymd if out else "")  # 파일에 기준일 셀 없음 → 요청한 날짜로
 
 # ── fetcher: 한화(PLUS) 엑셀 다운로드 (날짜 파라미터) → {종목:수량}, 기준일 ──
@@ -111,8 +120,10 @@ def fetch_plus(n, ymd):
             if not row or len(row) <= max(i_nm, i_q): continue
             nm = str(row[i_nm]).strip() if row[i_nm] else ""
             if not nm or any(s in nm for s in SKIP): continue
-            try: out[nm] = out.get(nm, 0.0) + float(str(row[i_q]).replace(",", ""))
-            except (ValueError, TypeError): pass
+            try: q = float(str(row[i_q]).replace(",", ""))
+            except (ValueError, TypeError): continue
+            if nm in out: out[nm][0] += q
+            else: out[nm] = [q, None]   # PLUS 엑셀엔 평가금액 없음 → 종가 미상
     return out, actual
 
 # ── fetcher: KB(RISE) 구성종목 엑셀(HTML-xls, searchDate) → {종목:수량}, 기준일 ──
@@ -129,11 +140,12 @@ def fetch_rise(stid, ymd):
         t = pd.read_html(io.StringIO(r.text))[0]
     except Exception:
         return {}, ""
-    hdr = None
+    hdr = None; i_ev = None
     for i in range(len(t)):
         vals = [str(x).strip() for x in t.iloc[i].tolist()]
         if "종목명" in vals and any("수량" in v for v in vals):
-            i_nm = vals.index("종목명"); i_q = next(j for j, v in enumerate(vals) if "수량" in v); hdr = i; break
+            i_nm = vals.index("종목명"); i_q = next(j for j, v in enumerate(vals) if "수량" in v)
+            i_ev = next((j for j, v in enumerate(vals) if "평가" in v), None); hdr = i; break
     if hdr is None:
         return {}, ""
     for i in range(hdr + 1, len(t)):
@@ -141,8 +153,12 @@ def fetch_rise(stid, ymd):
         if len(vals) <= max(i_nm, i_q): continue
         nm = vals[i_nm]
         if not nm or nm == "nan" or any(s in nm for s in SKIP): continue
-        try: out[nm] = out.get(nm, 0.0) + float(vals[i_q].replace(",", ""))
-        except ValueError: pass
+        try:
+            q = float(vals[i_q].replace(",", ""))
+            ev = float(vals[i_ev].replace(",", "")) if i_ev is not None else 0.0
+        except ValueError: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if (q and ev) else None)]
     return out, (ymd if out else "")
 
 # ── fetcher: 미래에셋(TIGER) pdfListAjax.ajax (세션+fixDate 점형식) → {종목:수량}, 기준일 ──
@@ -164,8 +180,12 @@ def fetch_tiger(isin, ymd):
     for _, row in df.iterrows():
         nm = str(row[1]).strip()  # col0=종목코드,col1=종목명,col2=수량,col3=평가금액,col4=비중
         if not nm or nm == "nan" or any(sk in nm for sk in SKIP): continue
-        try: out[nm] = out.get(nm, 0.0) + float(str(row[2]).replace(",", ""))
-        except (ValueError, TypeError): pass
+        try:
+            q = float(str(row[2]).replace(",", ""))
+            ev = float(str(row[3]).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if (q and ev) else None)]
     return out, (ymd if out else "")
 
 # ── fetcher: 현대(UNICORN) /api/etfPdf (fundCode,etfCode,ymd) → {종목:수량}, 기준일 ──
@@ -214,16 +234,26 @@ ETFS = [
     #   fetch_unicorn·fetch_db 함수는 코드에 유지 → 재추가 가능.
 ]
 
+def _qp(v):
+    """맵 값 → (수량, 종가). 값은 [수량,종가](신형) 또는 숫자(구형) 모두 허용."""
+    if isinstance(v, (list, tuple)):
+        return float(v[0]), (float(v[1]) if v[1] not in (None, "") else None)
+    return float(v), None
+
 def diff(tmap, pmap):
     rows = []
     for nm in set(tmap) | set(pmap):
-        t = tmap.get(nm, 0.0); p = pmap.get(nm, 0.0); ch = t - p
-        if p == 0 and t > 0:   typ = "신규편입"
-        elif t == 0 and p > 0: typ = "편출"
-        elif ch > 0:           typ = "수량확대"
-        elif ch < 0:           typ = "수량축소"
-        else:                  typ = "유지"
-        rows.append({"종목명": nm, "당일수량": t, "전일수량": p, "변화": ch, "구분": typ})
+        tq, tp = _qp(tmap.get(nm, (0.0, None)))
+        pq, pp = _qp(pmap.get(nm, (0.0, None)))
+        ch = tq - pq
+        if pq == 0 and tq > 0:   typ = "신규편입"
+        elif tq == 0 and pq > 0: typ = "편출"
+        elif ch > 0:             typ = "수량확대"
+        elif ch < 0:             typ = "수량축소"
+        else:                    typ = "유지"
+        price = tp if tp else pp          # 당일 종가 우선, 편출이면 전일 종가
+        amt = round(ch * price) if price else None   # 변화금액(원) = 변화 × 종가
+        rows.append({"종목명": nm, "당일수량": tq, "전일수량": pq, "변화": ch, "구분": typ, "변화금액": amt})
     rows.sort(key=lambda r: -abs(r["변화"]))
     return rows
 
@@ -283,7 +313,8 @@ def run(today=None):
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell})
             for r in rows:
                 csv_rows.append([e["name"], e["am"], t_ymd, p_ymd, r["구분"], r["종목명"],
-                                 int(r["당일수량"]), int(r["전일수량"]), int(r["변화"])])
+                                 int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
+                                 (r["변화금액"] if r["변화금액"] is not None else "")])
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
@@ -291,7 +322,7 @@ def run(today=None):
     csv_path = os.path.join(BASE, f"pdf_change_{t_ymd}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화"])
+        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화","변화금액(원)"])
         for r in csv_rows: w.writerow(r)
     xlsx_path = write_excel(groups, today, prev, status_line)
     print(f"\n[{status_line}]  변화 {len(csv_rows)}행 → {os.path.basename(xlsx_path)}")
@@ -398,62 +429,66 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
     SELLHEAD = Font(bold=True, color="FFFFFF"); SELLHBG = PatternFill("solid", fgColor="0070C0")
     BUYBG = PatternFill("solid", fgColor="FCE4E4"); SELLBG = PatternFill("solid", fgColor="E4ECF6")
     thin = Side(style="thin", color="D9D9D9"); border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    NUMFMT_UP = "+#,##0;-#,##0;0"
+    NUMFMT_UP = "+#,##0;-#,##0;0"   # 수량(주) 부호표시
+    AMTFMT = "+#,##0;-#,##0;0"      # 변화금액(원) 부호표시
     td = today.strftime("%Y-%m-%d"); pd_ = prev.strftime("%Y-%m-%d")
+    NC = 9  # A~I (좌4 + gap + 우4)
+    def mergerow(r): ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NC)
 
-    ws.merge_cells("A1:G1")
+    mergerow(1)
     ws["A1"] = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pd_}"
     ws["A1"].font = Font(bold=True, size=14); ws["A1"].alignment = Alignment(vertical="center")
     ws.row_dimensions[1].height = 26
     if status_line:
-        ws.merge_cells("A2:G2"); ws["A2"] = status_line
+        mergerow(2); ws["A2"] = status_line
         ws["A2"].font = Font(size=10, color="595959", italic=True)
     row = 3
     for g in groups:
         etf, am, state = g["etf"], g["am"], g["state"]
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+        mergerow(row)
         if state == "pending":
             bc = ws.cell(row, 1, f"■ {etf}  ({am})      ⏳ 대기 — 당일 PDF 미게시/지연 (게시되면 자동 반영)")
             bc.font = PENDF; bc.alignment = Alignment(vertical="center")
-            for c in range(1, 8): ws.cell(row, c).fill = PENDBG
+            for c in range(1, NC + 1): ws.cell(row, c).fill = PENDBG
             ws.row_dimensions[row].height = 19; row += 2; continue
         bc = ws.cell(row, 1, f"■ {etf}  ({am})      {lbl_cur} {td}  vs  {lbl_prev} {pd_}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
         bc.font = BANNERF; bc.alignment = Alignment(vertical="center")
-        for c in range(1, 8): ws.cell(row, c).fill = BANNERBG
+        for c in range(1, NC + 1): ws.cell(row, c).fill = BANNERBG
         ws.row_dimensions[row].height = 19; row += 1
         if not buy and not sell:
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+            mergerow(row)
             nc = ws.cell(row, 1, "변화 없음 (구성종목 동일)"); nc.font = Font(color="808080", italic=True)
             row += 2; continue
-        # 좌/우 헤더
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
-        ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=7)
+        # 좌(매수 1~4) / 우(매도 6~9) 헤더
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+        ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=9)
         hl = ws.cell(row, 1, "🔴 매수 (확대·신규편입)"); hl.font = BUYHEAD; hl.alignment = Alignment(horizontal="center")
-        hr = ws.cell(row, 5, "🔵 매도 (축소·편출)"); hr.font = SELLHEAD; hr.alignment = Alignment(horizontal="center")
-        for c in (1, 2, 3): ws.cell(row, c).fill = BUYHBG
-        for c in (5, 6, 7): ws.cell(row, c).fill = SELLHBG
+        hr = ws.cell(row, 6, "🔵 매도 (축소·편출)"); hr.font = SELLHEAD; hr.alignment = Alignment(horizontal="center")
+        for c in (1, 2, 3, 4): ws.cell(row, c).fill = BUYHBG
+        for c in (6, 7, 8, 9): ws.cell(row, c).fill = SELLHBG
         row += 1
-        for c, t in zip((1, 2, 3, 5, 6, 7), ("종목명", "변화", "전일→당일", "종목명", "변화", "전일→당일")):
+        for c, t in zip((1, 2, 3, 4, 6, 7, 8, 9),
+                        ("종목명", "변화(주)", "변화금액(원)", "전일→당일", "종목명", "변화(주)", "변화금액(원)", "전일→당일")):
             cell = ws.cell(row, c, t); cell.font = Font(bold=True, size=9, color="595959")
             cell.alignment = Alignment(horizontal="center"); cell.border = border
         row += 1
+        def put(r0, base, fnt, bg):
+            nm = r0["종목명"]; pq = int(r0["전일수량"]); tq = int(r0["당일수량"]); amt = r0["변화금액"]
+            tag = "  (신규)" if r0["구분"] == "신규편입" else ("  (편출)" if r0["구분"] == "편출" else "")
+            ws.cell(row, base, nm + tag).font = fnt
+            cc = ws.cell(row, base + 1, int(r0["변화"])); cc.number_format = NUMFMT_UP; cc.font = fnt; cc.fill = bg; cc.alignment = Alignment(horizontal="right")
+            ca = ws.cell(row, base + 2, amt if amt is not None else "-"); ca.font = fnt; ca.fill = bg; ca.alignment = Alignment(horizontal="right")
+            if amt is not None: ca.number_format = AMTFMT
+            ws.cell(row, base + 3, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
         for i in range(max(len(buy), len(sell))):
-            if i < len(buy):
-                r = buy[i]; nm = r["종목명"]; pq = int(r["전일수량"]); tq = int(r["당일수량"])
-                ws.cell(row, 1, nm + ("  (신규)" if r["구분"] == "신규편입" else "")).font = RED
-                cc = ws.cell(row, 2, int(r["변화"])); cc.number_format = NUMFMT_UP; cc.font = RED; cc.fill = BUYBG; cc.alignment = Alignment(horizontal="right")
-                ws.cell(row, 3, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
-            if i < len(sell):
-                r = sell[i]; nm = r["종목명"]; pq = int(r["전일수량"]); tq = int(r["당일수량"])
-                ws.cell(row, 5, nm + ("  (편출)" if r["구분"] == "편출" else "")).font = BLUE
-                cc = ws.cell(row, 6, int(r["변화"])); cc.number_format = NUMFMT_UP; cc.font = BLUE; cc.fill = SELLBG; cc.alignment = Alignment(horizontal="right")
-                ws.cell(row, 7, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
-            for c in (1, 2, 3, 5, 6, 7): ws.cell(row, c).border = border
+            if i < len(buy): put(buy[i], 1, RED, BUYBG)
+            if i < len(sell): put(sell[i], 6, BLUE, SELLBG)
+            for c in (1, 2, 3, 4, 6, 7, 8, 9): ws.cell(row, c).border = border
             row += 1
         row += 1
 
-    for col, w in zip("ABCDEFG", [20, 10, 15, 3, 20, 10, 15]):
+    for col, w in zip("ABCDEFGHI", [18, 9, 14, 13, 3, 18, 9, 14, 13]):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = "A3"
     base_name = fname or f"pdf_change_{today.strftime('%Y%m%d')}.xlsx"
