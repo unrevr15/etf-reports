@@ -47,13 +47,15 @@ jobs:
         env:
           TZ: Asia/Seoul
           RCLONE_REMOTE: ${{ vars.RCLONE_REMOTE || 'gdrive:etf_reports' }}
-          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}   # 전체매매금액(상장좌수) 계산용
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}   # 전체매매금액(상장좌수)·비중(순자산) 계산용
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}     # 표 이미지 텔레그램 전송(있을 때만)
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python cloud/run_daily.py
 
       - name: 리포트를 레포에 커밋 (reports/)
         run: |
           mkdir -p reports
-          mv -f pdf_change_*.xlsx pdf_weekly_*.xlsx pdf_rolling*.xlsx portfolio_*.png reports/ 2>/dev/null || true
+          mv -f pdf_change_*.xlsx pdf_change_*.png pdf_weekly_*.xlsx pdf_rolling*.xlsx portfolio_*.png reports/ 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f reports/

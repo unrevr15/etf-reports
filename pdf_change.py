@@ -393,6 +393,9 @@ def run(today=None):
         except Exception as ex:
             print(f"[주간] 생성 실패: {type(ex).__name__}: {ex}")
 
+    return {"groups": groups, "today": today, "prev": prev, "status_line": status_line,
+            "csv_path": csv_path, "xlsx_path": xlsx_path, "done": done, "pending": pend}
+
 
 def week_trading_days(any_day):
     """any_day가 속한 주의 거래일 리스트(과거→현재). 월요일부터 any_day까지 중 거래일만.
@@ -579,6 +582,96 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
         # 다음 회차(10분 뒤)에 파일이 닫혀 있으면 동일 이름으로 덮어써짐 → 하루 1개 유지.
         print(f"  [스킵] {base_name} 열려있어 저장 보류 — 파일 닫으면 다음 회차에 갱신됨")
         return path
+
+# ── 텔레그램용 이미지 렌더 + 전송 ─────────────────────────────
+def _setup_mpl_font():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.font_manager as fm
+    avail = {f.name for f in fm.fontManager.ttflist}
+    for f in ("Malgun Gothic", "NanumGothic", "NanumBarunGothic", "AppleGothic", "Noto Sans CJK KR"):
+        if f in avail:
+            matplotlib.rcParams["font.family"] = f; break
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+def _eok(x):
+    """원 → '±NN.N억' 문자열(없으면 '-')."""
+    return "-" if x is None else f"{x/1e8:+,.1f}억"
+
+def render_report_image(groups, today, prev, status_line="", title=None,
+                        lbl_cur="당일", lbl_prev="전영업일", out_png=None):
+    """엑셀 표를 한 장의 PNG로 렌더(ETF별 매수/매도). 반환: 경로, 변화 없으면 None."""
+    _setup_mpl_font()
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+    caps = [g for g in groups if g["state"] == "captured" and (g["buy"] or g["sell"])]
+    if not caps:
+        return None
+    td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
+    nrows = [max(len(g["buy"]), len(g["sell"])) for g in caps]
+    ratios = [n + 1.6 for n in nrows]
+    fig_h = 1.0 + sum(r * 0.32 for r in ratios)
+    fig = plt.figure(figsize=(11.5, fig_h), dpi=170)
+    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.6)
+    RED = "#C00000"; BLUE = "#0070C0"; RBG = "#FCE4E4"; BBG = "#E4ECF6"
+    for gi, g in enumerate(caps):
+        ax = fig.add_subplot(gs[gi]); ax.axis("off")
+        buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
+        aum = g.get("aum")
+        ttl = f"■ {g['etf']}  ({g['am']})" + (f"   순자산 약 {aum/1e8:,.0f}억" if aum else "") + \
+              f"      매수 {len(buy)}  /  매도 {len(sell)}"
+        ax.set_title(ttl, loc="left", fontsize=11, fontweight="bold", color="#1F3864", pad=6)
+        n = max(len(buy), len(sell))
+        cols = ["매수 종목", "변화(주)", "금액", "비중", "", "매도 종목", "변화(주)", "금액", "비중"]
+        cell = []; ccol = []
+        for i in range(n):
+            row = [""] * 9; col = ["white"] * 9
+            if i < len(buy):
+                b = buy[i]; tag = " (신규)" if b["구분"] == "신규편입" else ""
+                row[0] = b["종목명"] + tag; row[1] = f"{int(b['변화']):+,}"; row[2] = _eok(b.get("전체금액"))
+                row[3] = f"{b['비중']:+.2f}%" if b.get("비중") is not None else "-"
+                for c in (0, 1, 2, 3): col[c] = RBG
+            if i < len(sell):
+                s = sell[i]; tag = " (편출)" if s["구분"] == "편출" else ""
+                row[5] = s["종목명"] + tag; row[6] = f"{int(s['변화']):+,}"; row[7] = _eok(s.get("전체금액"))
+                row[8] = f"{s['비중']:+.2f}%" if s.get("비중") is not None else "-"
+                for c in (5, 6, 7, 8): col[c] = BBG
+            cell.append(row); ccol.append(col)
+        tbl = ax.table(cellText=cell, colLabels=cols, cellColours=ccol,
+                       colColours=[RED, RED, RED, RED, "white", BLUE, BLUE, BLUE, BLUE],
+                       cellLoc="center", loc="upper center",
+                       colWidths=[0.23, 0.09, 0.10, 0.09, 0.02, 0.23, 0.09, 0.10, 0.09])
+        tbl.auto_set_font_size(False); tbl.set_fontsize(8.5); tbl.scale(1, 1.28)
+        for c in range(9):
+            if c != 4:
+                t = tbl[0, c].get_text(); t.set_color("white"); t.set_fontweight("bold")
+    sub = f"\n{status_line}" if status_line else ""
+    sup = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pdd}"
+    fig.suptitle(sup + sub, fontsize=13, fontweight="bold", y=0.999)
+    out_png = out_png or os.path.join(BASE, f"pdf_change_{today.strftime('%Y%m%d')}.png")
+    fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
+    return out_png
+
+def send_telegram(png_path, caption=""):
+    """TELEGRAM_TOKEN/TELEGRAM_CHAT_ID 있으면 이미지 전송(sendPhoto→실패 시 sendDocument)."""
+    tok = os.environ.get("TELEGRAM_TOKEN"); chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (tok and chat):
+        print("  [텔레그램] 토큰/챗ID 미설정 — 전송 스킵"); return False
+    if not (png_path and os.path.exists(png_path)):
+        print("  [텔레그램] 보낼 이미지 없음"); return False
+    for method, field in (("sendPhoto", "photo"), ("sendDocument", "document")):
+        try:
+            with open(png_path, "rb") as f:
+                r = requests.post(f"https://api.telegram.org/bot{tok}/{method}",
+                                  data={"chat_id": chat, "caption": caption[:1024]},
+                                  files={field: f}, timeout=60)
+            if r.ok and r.json().get("ok"):
+                print(f"  [텔레그램] {method} 전송 완료"); return True
+            print(f"  [텔레그램] {method} 실패: {r.text[:150]}")
+        except Exception as e:
+            print(f"  [텔레그램] {method} 오류: {type(e).__name__}: {e}")
+    return False
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]

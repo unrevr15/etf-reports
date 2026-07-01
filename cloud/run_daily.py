@@ -29,7 +29,17 @@ def main():
     ymd = today.strftime("%Y%m%d")
 
     log("1) 일일 리포트")
-    P.run(today)                       # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
+    ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
+    log("1-b) 텔레그램 이미지 전송")
+    try:
+        png = P.render_report_image(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])
+        if png:
+            cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
+            P.send_telegram(png, cap)
+        else:
+            log("  변화 없음 — 텔레그램 스킵")
+    except Exception as e:
+        log(f"  텔레그램 실패: {type(e).__name__}: {e}")
     log("2) 최근 5거래일 롤링")
     try: P.rolling_report(today, 5)    # pdf_rolling5_YYYYMMDD.xlsx
     except Exception as e: log(f"  롤링 실패: {type(e).__name__}: {e}")
@@ -39,7 +49,7 @@ def main():
 
     # 4) 오늘 산출물 업로드
     targets = []
-    for pat in (f"pdf_change_{ymd}.xlsx", f"pdf_weekly_{ymd}.xlsx",
+    for pat in (f"pdf_change_{ymd}.xlsx", f"pdf_change_{ymd}.png", f"pdf_weekly_{ymd}.xlsx",
                 f"pdf_rolling5_{ymd}.xlsx", f"portfolio_{ymd}.png"):
         targets += glob.glob(os.path.join(APP, pat))
     if not targets:
