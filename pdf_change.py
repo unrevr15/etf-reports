@@ -238,6 +238,7 @@ ETFS = [
 # ── 상장좌수(KRX) → 전체 CU수 계산 ─────────────────────────────
 _SHARES_CACHE = {}
 _NAV_CACHE = {}   # {KRX단축코드: 순자산총액(원)} — 비중 분모(전체 ETF 액수)
+_KRX_PX_CACHE = {}   # {종목명: 종가} — 운용사가 평가금액 미제공(예: PLUS)일 때 종가 fallback
 def _krx_key():
     k = os.getenv("KRX_API_KEY", "")
     if k: return k
@@ -285,6 +286,26 @@ def etf_navtotal(e):
     listed_shares()  # 캐시 채움(좌수와 동일 API)
     return _NAV_CACHE.get(e.get("krx", ""), 0)
 
+def krx_kosdaq_prices():
+    """{종목명: 종가} — KRX 코스닥 최근 영업일 종가. 운용사 평가금액 미제공 종목의 종가 fallback."""
+    if _KRX_PX_CACHE: return _KRX_PX_CACHE
+    key = _krx_key()
+    if not key: return {}
+    for off in range(1, 8):
+        d = (datetime.now().date() - timedelta(days=off)).strftime("%Y%m%d")
+        try:
+            r = requests.get("http://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd",
+                             params={"AUTH_KEY": key, "basDd": d}, timeout=20)
+            items = r.json().get("OutBlock_1", []) if r.status_code == 200 else []
+        except Exception:
+            items = []
+        if items:
+            for it in items:
+                try: _KRX_PX_CACHE[it["ISU_NM"].strip()] = float(str(it["TDD_CLSPRC"]).replace(",", ""))
+                except (ValueError, KeyError): pass
+            break
+    return _KRX_PX_CACHE
+
 def _qp(v):
     """맵 값 → (수량, 종가). 값은 [수량,종가](신형) 또는 숫자(구형) 모두 허용."""
     if isinstance(v, (list, tuple)):
@@ -303,6 +324,8 @@ def diff(tmap, pmap):
         elif ch < 0:             typ = "수량축소"
         else:                    typ = "유지"
         price = tp if tp else pp          # 당일 종가 우선, 편출이면 전일 종가
+        if not price:                     # 운용사 평가금액 미제공(PLUS 등) → KRX 코스닥 종가로 보완
+            price = krx_kosdaq_prices().get(nm)
         amt = round(ch * price) if price else None   # 변화금액(원) = 변화 × 종가
         rows.append({"종목명": nm, "당일수량": tq, "전일수량": pq, "변화": ch, "구분": typ, "변화금액": amt})
     rows.sort(key=lambda r: -abs(r["변화"]))
