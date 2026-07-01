@@ -237,6 +237,7 @@ ETFS = [
 
 # ── 상장좌수(KRX) → 전체 CU수 계산 ─────────────────────────────
 _SHARES_CACHE = {}
+_NAV_CACHE = {}   # {KRX단축코드: 순자산총액(원)} — 비중 분모(전체 ETF 액수)
 def _krx_key():
     k = os.getenv("KRX_API_KEY", "")
     if k: return k
@@ -268,6 +269,8 @@ def listed_shares():
                 code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
                 try: _SHARES_CACHE[code] = int(str(it.get("LIST_SHRS", "0")).replace(",", "") or 0)
                 except ValueError: pass
+                try: _NAV_CACHE[code] = int(str(it.get("INVSTASST_NETASST_TOTAMT", "0")).replace(",", "") or 0)
+                except ValueError: pass
             break
     return _SHARES_CACHE
 
@@ -276,6 +279,11 @@ def num_cu(e):
     sh = listed_shares().get(e.get("krx", ""), 0)
     cu = e.get("cu", 0)
     return (sh / cu) if (sh and cu) else 0
+
+def etf_navtotal(e):
+    """ETF 순자산총액(원, KRX 공식) = 비중 분모. 미상이면 0."""
+    listed_shares()  # 캐시 채움(좌수와 동일 API)
+    return _NAV_CACHE.get(e.get("krx", ""), 0)
 
 def _qp(v):
     """맵 값 → (수량, 종가). 값은 [수량,종가](신형) 또는 숫자(구형) 모두 허용."""
@@ -352,16 +360,20 @@ def run(today=None):
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
             nc = num_cu(e)
+            stockval = sum(q * p for q, p in (_qp(v) for v in kk[t_ymd].values()) if p) * nc  # 보유주식총액(PDF, fallback)
+            aum = etf_navtotal(e) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
             for r in rows:
                 r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
+                r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
-            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell})
+            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell, "aum": aum})
             for r in rows:
                 csv_rows.append([e["name"], e["am"], t_ymd, p_ymd, r["구분"], r["종목명"],
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
                                  (r["변화금액"] if r["변화금액"] is not None else ""),
-                                 (r["전체금액"] if r["전체금액"] is not None else "")])
+                                 (r["전체금액"] if r["전체금액"] is not None else ""),
+                                 (r["비중"] if r.get("비중") is not None else "")])
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
@@ -369,7 +381,7 @@ def run(today=None):
     csv_path = os.path.join(BASE, f"pdf_change_{t_ymd}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)"])
+        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)","전체대비비중(%)"])
         for r in csv_rows: w.writerow(r)
     xlsx_path = write_excel(groups, today, prev, status_line)
     print(f"\n[{status_line}]  변화 {len(csv_rows)}행 → {os.path.basename(xlsx_path)}")
@@ -422,11 +434,14 @@ def _build_period_groups(first, last):
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
             nc = num_cu(e)
+            stockval = sum(q * p for q, p in (_qp(v) for v in lm.values()) if p) * nc  # 보유주식총액(마지막일, fallback)
+            aum = etf_navtotal(e) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
             for r in rows:
                 r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
+                r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
-            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell})
+            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell, "aum": aum})
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
@@ -481,8 +496,9 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
     thin = Side(style="thin", color="D9D9D9"); border = Border(left=thin, right=thin, top=thin, bottom=thin)
     NUMFMT_UP = "+#,##0;-#,##0;0"   # 수량(주) 부호표시
     AMTFMT = "+#,##0;-#,##0;0"      # 변화금액(원) 부호표시
+    PCTFMT = '+0.00"%";-0.00"%";0'  # 전체대비 비중 부호표시
     td = today.strftime("%Y-%m-%d"); pd_ = prev.strftime("%Y-%m-%d")
-    NC = 9  # A~I (좌4 + gap + 우4)
+    NC = 11  # A~K (좌5 + gap + 우5)
     def mergerow(r): ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NC)
 
     mergerow(1)
@@ -502,7 +518,9 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
             bc.font = PENDF; bc.alignment = Alignment(vertical="center")
             for c in range(1, NC + 1): ws.cell(row, c).fill = PENDBG
             ws.row_dimensions[row].height = 19; row += 2; continue
-        bc = ws.cell(row, 1, f"■ {etf}  ({am})      {lbl_cur} {td}  vs  {lbl_prev} {pd_}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
+        aum = g.get("aum")
+        aum_txt = f"      순자산 ≈ {aum/1e8:,.0f}억" if aum else ""
+        bc = ws.cell(row, 1, f"■ {etf}  ({am}){aum_txt}      {lbl_cur} {td}  vs  {lbl_prev} {pd_}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
         bc.font = BANNERF; bc.alignment = Alignment(vertical="center")
         for c in range(1, NC + 1): ws.cell(row, c).fill = BANNERBG
         ws.row_dimensions[row].height = 19; row += 1
@@ -510,35 +528,39 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
             mergerow(row)
             nc = ws.cell(row, 1, "변화 없음 (구성종목 동일)"); nc.font = Font(color="808080", italic=True)
             row += 2; continue
-        # 좌(매수 1~4) / 우(매도 6~9) 헤더
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
-        ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=9)
+        # 좌(매수 1~5) / 우(매도 7~11) 헤더
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
+        ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=11)
         hl = ws.cell(row, 1, "🔴 매수 (확대·신규편입)"); hl.font = BUYHEAD; hl.alignment = Alignment(horizontal="center")
-        hr = ws.cell(row, 6, "🔵 매도 (축소·편출)"); hr.font = SELLHEAD; hr.alignment = Alignment(horizontal="center")
-        for c in (1, 2, 3, 4): ws.cell(row, c).fill = BUYHBG
-        for c in (6, 7, 8, 9): ws.cell(row, c).fill = SELLHBG
+        hr = ws.cell(row, 7, "🔵 매도 (축소·편출)"); hr.font = SELLHEAD; hr.alignment = Alignment(horizontal="center")
+        for c in (1, 2, 3, 4, 5): ws.cell(row, c).fill = BUYHBG
+        for c in (7, 8, 9, 10, 11): ws.cell(row, c).fill = SELLHBG
         row += 1
-        for c, t in zip((1, 2, 3, 4, 6, 7, 8, 9),
-                        ("종목명", "변화(1CU주)", "전체매매금액(원)", "전일→당일", "종목명", "변화(1CU주)", "전체매매금액(원)", "전일→당일")):
+        for c, t in zip((1, 2, 3, 4, 5, 7, 8, 9, 10, 11),
+                        ("종목명", "변화(1CU주)", "전체매매금액(원)", "전체대비비중", "전일→당일",
+                         "종목명", "변화(1CU주)", "전체매매금액(원)", "전체대비비중", "전일→당일")):
             cell = ws.cell(row, c, t); cell.font = Font(bold=True, size=9, color="595959")
             cell.alignment = Alignment(horizontal="center"); cell.border = border
         row += 1
         def put(r0, base, fnt, bg):
-            nm = r0["종목명"]; pq = int(r0["전일수량"]); tq = int(r0["당일수량"]); amt = r0.get("전체금액")
+            nm = r0["종목명"]; pq = int(r0["전일수량"]); tq = int(r0["당일수량"])
+            amt = r0.get("전체금액"); pct = r0.get("비중")
             tag = "  (신규)" if r0["구분"] == "신규편입" else ("  (편출)" if r0["구분"] == "편출" else "")
             ws.cell(row, base, nm + tag).font = fnt
             cc = ws.cell(row, base + 1, int(r0["변화"])); cc.number_format = NUMFMT_UP; cc.font = fnt; cc.fill = bg; cc.alignment = Alignment(horizontal="right")
             ca = ws.cell(row, base + 2, amt if amt is not None else "-"); ca.font = fnt; ca.fill = bg; ca.alignment = Alignment(horizontal="right")
             if amt is not None: ca.number_format = AMTFMT
-            ws.cell(row, base + 3, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
+            cp = ws.cell(row, base + 3, pct if pct is not None else "-"); cp.font = fnt; cp.fill = bg; cp.alignment = Alignment(horizontal="right")
+            if pct is not None: cp.number_format = PCTFMT
+            ws.cell(row, base + 4, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
         for i in range(max(len(buy), len(sell))):
             if i < len(buy): put(buy[i], 1, RED, BUYBG)
-            if i < len(sell): put(sell[i], 6, BLUE, SELLBG)
-            for c in (1, 2, 3, 4, 6, 7, 8, 9): ws.cell(row, c).border = border
+            if i < len(sell): put(sell[i], 7, BLUE, SELLBG)
+            for c in (1, 2, 3, 4, 5, 7, 8, 9, 10, 11): ws.cell(row, c).border = border
             row += 1
         row += 1
 
-    for col, w in zip("ABCDEFGHI", [18, 9, 14, 13, 3, 18, 9, 14, 13]):
+    for col, w in zip("ABCDEFGHIJK", [18, 9, 14, 11, 13, 3, 18, 9, 14, 11, 13]):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = "A3"
     base_name = fname or f"pdf_change_{today.strftime('%Y%m%d')}.xlsx"
