@@ -2,11 +2,11 @@ name: ETF PDF 변화 일일 자동
 
 # 스케줄은 UTC 기준 (한국=UTC+9). 평일/휴장 판단은 스크립트가 알아서 함.
 #   UTC 21,22,23 → KST 06,07,08 / UTC 0,1 → KST 09,10 / UTC 7 → KST 16(늦게 뜨는 TIGER)
-#   UTC 22:30 → KST 07:30 = 텔레그램 채널 전송 시각(이 실행에서만 전송)
+#   UTC 22:10 → KST 07:10 = 텔레그램 채널 전송 시각(이 실행에서만, 준비된 6개 발송)
 on:
   schedule:
     - cron: "0 21,22,23 * * *"
-    - cron: "30 22 * * *"     # KST 07:30 — @pefscreener 채널 전송
+    - cron: "10 22 * * *"     # KST 07:10 — @pefscreener 채널 전송(되는대로 6개)
     - cron: "0 0,1 * * *"
     - cron: "0 7 * * *"
   workflow_dispatch: {}   # 수동 실행 버튼(전송도 함)
@@ -52,8 +52,8 @@ jobs:
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}   # 전체매매금액(상장좌수)·비중(순자산) 계산용
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}     # 표 이미지 텔레그램 전송(있을 때만)
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # 채널: @pefscreener
-          # 07:30 실행 또는 수동실행일 때만 채널 전송(나머지 실행은 렌더/저장만 → 채널 도배 방지)
-          TELEGRAM_SEND: ${{ github.event.schedule == '30 22 * * *' || github.event_name == 'workflow_dispatch' }}
+          # 07:10 실행 또는 수동실행일 때만 채널 전송(나머지 실행은 렌더/저장만 → 채널 도배 방지)
+          TELEGRAM_SEND: ${{ github.event.schedule == '10 22 * * *' || github.event_name == 'workflow_dispatch' }}
         run: python cloud/run_daily.py
 
       - name: 리포트를 레포에 커밋 (reports/)
