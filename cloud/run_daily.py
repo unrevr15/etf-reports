@@ -30,16 +30,19 @@ def main():
 
     log("1) 일일 리포트")
     ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
-    log("1-b) 텔레그램 이미지 전송")
+    log("1-b) 표 이미지 렌더 (+ 07:30/수동 실행이면 채널 전송)")
     try:
         png = P.render_report_image(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])
-        if png:
+        send = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")
+        if png and send:
             cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
             P.send_telegram(png, cap)
+        elif not png:
+            log("  변화 없음 — 이미지/전송 없음")
         else:
-            log("  변화 없음 — 텔레그램 스킵")
+            log("  전송 시각 아님 — 이미지 렌더/저장만")
     except Exception as e:
-        log(f"  텔레그램 실패: {type(e).__name__}: {e}")
+        log(f"  이미지/텔레그램 실패: {type(e).__name__}: {e}")
     log("2) 최근 5거래일 롤링")
     try: P.rolling_report(today, 5)    # pdf_rolling5_YYYYMMDD.xlsx
     except Exception as e: log(f"  롤링 실패: {type(e).__name__}: {e}")
