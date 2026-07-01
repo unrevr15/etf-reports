@@ -633,9 +633,10 @@ def render_report_image(groups, today, prev, status_line="", title=None,
     td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
     nrows = [max(len(g["buy"]), len(g["sell"])) for g in caps]
     ratios = [n + 1.6 for n in nrows]
-    fig_h = 1.0 + sum(r * 0.46 for r in ratios)
+    fig_h = max(3.4, 1.2 + sum(r * 0.46 for r in ratios))  # 짧은 리포트도 제목-배너 겹침 방지 최소높이
     fig = plt.figure(figsize=(12.5, fig_h), dpi=170)
-    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.6)
+    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.6,
+                  top=1 - 1.0 / fig_h, bottom=0.2 / fig_h, left=0.012, right=0.988)  # 상단 1인치=제목 전용(겹침 방지)
     RED = "#C00000"; BLUE = "#0070C0"; RBG = "#FCE4E4"; BBG = "#E4ECF6"
     for gi, g in enumerate(caps):
         ax = fig.add_subplot(gs[gi]); ax.axis("off")
@@ -673,9 +674,12 @@ def render_report_image(groups, today, prev, status_line="", title=None,
                 if c0 != 4: t.set_color("white"); t.set_fontweight("bold"); t.set_fontsize(10)
             elif c0 in (0, 2, 5, 7):   # 종목명·금액 강조(굵게)
                 t.set_fontweight("bold")
+            if r0 > 0 and c0 in (0, 5):   # 종목명 길면 자동 축소(칸 넘침 방지)
+                s = t.get_text()
+                if s: t.set_fontsize(max(6.5, min(10, 10 * 13 / len(s))))
     sub = f"\n{status_line}" if status_line else ""
     sup = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pdd}"
-    fig.suptitle(sup + sub, fontsize=13, fontweight="bold", y=0.999)
+    fig.suptitle(sup + sub, fontsize=13, fontweight="bold", y=1 - 0.12 / fig_h, va="top")
     out_png = out_png or os.path.join(BASE, f"pdf_change_{today.strftime('%Y%m%d')}.png")
     fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return out_png
