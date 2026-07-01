@@ -633,8 +633,8 @@ def render_report_image(groups, today, prev, status_line="", title=None,
     td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
     nrows = [max(len(g["buy"]), len(g["sell"])) for g in caps]
     ratios = [n + 1.6 for n in nrows]
-    fig_h = 1.0 + sum(r * 0.32 for r in ratios)
-    fig = plt.figure(figsize=(13.5, fig_h), dpi=170)
+    fig_h = 1.0 + sum(r * 0.46 for r in ratios)
+    fig = plt.figure(figsize=(12.5, fig_h), dpi=170)
     gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.6)
     RED = "#C00000"; BLUE = "#0070C0"; RBG = "#FCE4E4"; BBG = "#E4ECF6"
     for gi, g in enumerate(caps):
@@ -645,31 +645,34 @@ def render_report_image(groups, today, prev, status_line="", title=None,
               f"      매수 {len(buy)}  /  매도 {len(sell)}"
         ax.set_title(ttl, loc="left", fontsize=11, fontweight="bold", color="#1F3864", pad=6)
         n = max(len(buy), len(sell))
-        cols = ["매수 종목", "변화", "금액", "비중", "전→당", "", "매도 종목", "변화", "금액", "비중", "전→당"]
+        cols = ["매수 종목", "변화(전→당)", "금액", "비중", "", "매도 종목", "변화(전→당)", "금액", "비중"]
+        def _chcell(r):   # 주수변화 + 전→당 한 칸에 (2줄)
+            return f"{int(r['변화']):+,}\n{int(r['전일수량']):,}→{int(r['당일수량']):,}"
         cell = []; ccol = []
         for i in range(n):
-            row = [""] * 11; col = ["white"] * 11
+            row = [""] * 9; col = ["white"] * 9
             if i < len(buy):
                 b = buy[i]; tag = " (신규)" if b["구분"] == "신규편입" else ""
-                row[0] = b["종목명"] + tag; row[1] = f"{int(b['변화']):+,}"; row[2] = _eok(b.get("전체금액"))
+                row[0] = b["종목명"] + tag; row[1] = _chcell(b); row[2] = _eok(b.get("전체금액"))
                 row[3] = f"{b['비중']:+.2f}%" if b.get("비중") is not None else "-"
-                row[4] = f"{int(b['전일수량']):,}→{int(b['당일수량']):,}"
-                for c in (0, 1, 2, 3, 4): col[c] = RBG
+                for c in (0, 1, 2, 3): col[c] = RBG
             if i < len(sell):
                 s = sell[i]; tag = " (편출)" if s["구분"] == "편출" else ""
-                row[6] = s["종목명"] + tag; row[7] = f"{int(s['변화']):+,}"; row[8] = _eok(s.get("전체금액"))
-                row[9] = f"{s['비중']:+.2f}%" if s.get("비중") is not None else "-"
-                row[10] = f"{int(s['전일수량']):,}→{int(s['당일수량']):,}"
-                for c in (6, 7, 8, 9, 10): col[c] = BBG
+                row[5] = s["종목명"] + tag; row[6] = _chcell(s); row[7] = _eok(s.get("전체금액"))
+                row[8] = f"{s['비중']:+.2f}%" if s.get("비중") is not None else "-"
+                for c in (5, 6, 7, 8): col[c] = BBG
             cell.append(row); ccol.append(col)
         tbl = ax.table(cellText=cell, colLabels=cols, cellColours=ccol,
-                       colColours=[RED, RED, RED, RED, RED, "white", BLUE, BLUE, BLUE, BLUE, BLUE],
+                       colColours=[RED, RED, RED, RED, "white", BLUE, BLUE, BLUE, BLUE],
                        cellLoc="center", loc="upper center",
-                       colWidths=[0.18, 0.065, 0.08, 0.07, 0.095, 0.02, 0.18, 0.065, 0.08, 0.07, 0.095])
-        tbl.auto_set_font_size(False); tbl.set_fontsize(8.0); tbl.scale(1, 1.28)
-        for c in range(11):
-            if c != 5:
-                t = tbl[0, c].get_text(); t.set_color("white"); t.set_fontweight("bold")
+                       colWidths=[0.19, 0.12, 0.095, 0.085, 0.02, 0.19, 0.12, 0.095, 0.085])
+        tbl.auto_set_font_size(False); tbl.set_fontsize(10); tbl.scale(1, 1.7)
+        for (r0, c0), cobj in tbl.get_celld().items():
+            t = cobj.get_text()
+            if r0 == 0:
+                if c0 != 4: t.set_color("white"); t.set_fontweight("bold"); t.set_fontsize(10)
+            elif c0 in (0, 2, 5, 7):   # 종목명·금액 강조(굵게)
+                t.set_fontweight("bold")
     sub = f"\n{status_line}" if status_line else ""
     sup = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pdd}"
     fig.suptitle(sup + sub, fontsize=13, fontweight="bold", y=0.999)
