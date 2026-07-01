@@ -633,7 +633,7 @@ def render_report_image(groups, today, prev, status_line="", title=None,
     td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
     nrows = [max(len(g["buy"]), len(g["sell"])) for g in caps]
     ratios = [n + 1.6 for n in nrows]
-    fig_h = max(3.4, 1.2 + sum(r * 0.46 for r in ratios))  # 짧은 리포트도 제목-배너 겹침 방지 최소높이
+    fig_h = max(3.6, 1.2 + sum(r * 0.6 for r in ratios))  # 2줄 셀 여유 + 짧은 리포트 제목겹침 방지 최소높이
     fig = plt.figure(figsize=(12.5, fig_h), dpi=170)
     gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.6,
                   top=1 - 1.0 / fig_h, bottom=0.2 / fig_h, left=0.012, right=0.988)  # 상단 1인치=제목 전용(겹침 방지)
@@ -667,7 +667,7 @@ def render_report_image(groups, today, prev, status_line="", title=None,
                        colColours=[RED, RED, RED, RED, "white", BLUE, BLUE, BLUE, BLUE],
                        cellLoc="center", loc="upper center",
                        colWidths=[0.19, 0.12, 0.095, 0.085, 0.02, 0.19, 0.12, 0.095, 0.085])
-        tbl.auto_set_font_size(False); tbl.set_fontsize(10); tbl.scale(1, 1.7)
+        tbl.auto_set_font_size(False); tbl.set_fontsize(10); tbl.scale(1, 2.2)
         for (r0, c0), cobj in tbl.get_celld().items():
             t = cobj.get_text()
             if r0 == 0:
