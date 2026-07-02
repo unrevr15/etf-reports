@@ -700,54 +700,66 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         a = r.get("전체금액"); return "-" if a is None else f"{a/1e8:+,.1f}억"
     def _pct(r):
         p = r.get("비중"); return "-" if p is None else f"{p:+.2f}%"
-    counts = [1 + 1 + max(1, len(g["buy"])) + 1 + max(1, len(g["sell"])) for g in caps]
-    ratios = [c + 1.3 for c in counts]
-    fig_h = max(4.0, 1.1 + sum(r * 0.50 for r in ratios))
-    fig = plt.figure(figsize=(5.3, fig_h), dpi=200)   # 폭 좁게
-    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.35,
-                  top=1 - 1.0 / fig_h, bottom=0.1 / fig_h, left=0.006, right=0.994)  # 양옆 여백 최소
-    GRID = "#8A8A8A"; SECT = "#DEDEDE"; HDR = "#C4C4C4"
+    # 연속 표(단일) 구성 → ETF 사이 빈 공간 제거
+    rows = []; styles = []; banners = {}
+    rows.append(["종목", "변화(전→당)", "금액", "비중"]); styles.append("hdr")
+    tot_b = tot_s = 0
     for gi, g in enumerate(caps):
-        ax = fig.add_subplot(gs[gi]); ax.axis("off")
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
+        tot_b += len(buy); tot_s += len(sell)
+        if gi > 0: rows.append(["", "", "", ""]); styles.append("gap")
         aum = g.get("aum")
-        ttl = f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else "")
-        ax.set_title(ttl, loc="left", fontsize=12, fontweight="bold", color="black", pad=3)
-        cells = []; styles = []
-        cells.append(["종목", "변화(전→당)", "금액", "비중"]); styles.append("hdr")
-        cells.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
+        banners[len(rows)] = f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else "")
+        rows.append(["", "", "", ""]); styles.append("etf")   # 배너는 표 위에 겹쳐 그림(잘림 방지)
+        rows.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
         for b in (buy or [None]):
-            if b is None: cells.append(["(없음)", "", "", ""])
-            else:
-                tag = " (신규)" if b["구분"] == "신규편입" else ""
-                cells.append([b["종목명"] + tag, _chc(b), _eok(b), _pct(b)])
+            rows.append(["(없음)", "", "", ""] if b is None else
+                        [b["종목명"] + (" (신규)" if b["구분"] == "신규편입" else ""), _chc(b), _eok(b), _pct(b)])
             styles.append("data")
-        cells.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
+        rows.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
         for s in (sell or [None]):
-            if s is None: cells.append(["(없음)", "", "", ""])
-            else:
-                tag = " (편출)" if s["구분"] == "편출" else ""
-                cells.append([s["종목명"] + tag, _chc(s), _eok(s), _pct(s)])
+            rows.append(["(없음)", "", "", ""] if s is None else
+                        [s["종목명"] + (" (편출)" if s["구분"] == "편출" else ""), _chc(s), _eok(s), _pct(s)])
             styles.append("data")
-        tbl = ax.table(cellText=cells, cellLoc="left", loc="upper center",
-                       colWidths=[0.36, 0.25, 0.21, 0.17])   # 합≈0.99, 변화칸 좁게(2줄)
-        tbl.auto_set_font_size(False); tbl.set_fontsize(12); tbl.scale(1, 2.3)
-        for (r0, c0), cell in tbl.get_celld().items():
-            cell.set_edgecolor(GRID); cell.set_linewidth(0.7)
-            t = cell.get_text(); st = styles[r0]
-            if st == "hdr":
-                cell.set_facecolor(HDR); t.set_fontweight("bold"); t.set_fontsize(10)
-            elif st == "sect":
-                cell.set_facecolor(SECT); t.set_fontweight("bold")
-            else:
-                cell.set_facecolor("white")
-                if c0 == 0:
-                    s0 = t.get_text()
-                    if len(s0) > 9: t.set_fontsize(max(8, min(12, 12 * 9 / len(s0))))
-                    else: t.set_fontweight("bold")
+    HU = {"hdr": 1.0, "etf": 1.25, "sect": 1.0, "data": 1.75, "gap": 0.5}   # 행 높이(상대)
+    units = sum(HU[s] for s in styles)
+    title_in = 1.05
+    ax_in = units * 0.235
+    fig_h = title_in + ax_in
+    fig = plt.figure(figsize=(5.2, fig_h), dpi=205)     # 폭 좁게
+    ax = fig.add_axes([0.008, 0.006, 0.984, ax_in / fig_h]); ax.axis("off")
+    GRID = "#8A8A8A"; SECT = "#DCDCDC"; HDR = "#C2C2C2"; ETFBG = "#B9B9B9"
+    tbl = ax.table(cellText=rows, cellLoc="left", colWidths=[0.36, 0.25, 0.21, 0.18], bbox=[0, 0, 1, 1])
+    tbl.auto_set_font_size(False); tbl.set_fontsize(12)
+    for (r0, c0), cell in tbl.get_celld().items():
+        st = styles[r0]; cell.set_height(HU[st]); t = cell.get_text()
+        cell.set_edgecolor(GRID); cell.set_linewidth(0.6)
+        if st == "hdr":
+            cell.set_facecolor(HDR); t.set_fontweight("bold"); t.set_fontsize(10)
+        elif st == "etf":
+            cell.set_facecolor(ETFBG); cell.set_edgecolor(ETFBG)
+        elif st == "sect":
+            cell.set_facecolor(SECT); t.set_fontweight("bold")
+        elif st == "gap":
+            cell.set_facecolor("white"); cell.set_edgecolor("white")
+        else:
+            cell.set_facecolor("white")
+            if c0 == 0:
+                s0 = t.get_text()
+                if len(s0) > 9: t.set_fontsize(max(8, min(12, 12 * 9 / len(s0))))
+                else: t.set_fontweight("bold")
+    # ETF 배너를 표 위에 겹쳐 그림(칸 폭 무시, 잘림 방지)
+    cum = 0.0
+    for i, st in enumerate(styles):
+        if st == "etf":
+            cy = 1 - (cum + 0.5 * HU[st]) / units
+            ax.text(0.012, cy, banners[i], transform=ax.transAxes, ha="left", va="center",
+                    fontweight="bold", fontsize=11.5, clip_on=False, zorder=5)
+        cum += HU[st]
+    n = len(caps)
+    summary = f"변화 {n}개 ETF  ·  매수 {tot_b} / 매도 {tot_s} 종목"
     sup = title or f"코스닥 액티브 ETF PDF 변화\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
-    fig.suptitle(sup + (f"\n{status_line}" if status_line else ""),
-                 fontsize=11.5, fontweight="bold", y=1 - 0.1 / fig_h, va="top")
+    fig.suptitle(f"{sup}\n{summary}", fontsize=11.5, fontweight="bold", y=1 - 0.12 / fig_h, va="top")
     out_png = out_png or os.path.join(BASE, f"pdf_change_m_{today.strftime('%Y%m%d')}.png")
     fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return out_png
