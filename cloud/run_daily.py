@@ -30,25 +30,27 @@ def main():
 
     log("1) 일일 리포트")
     ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
-    log("1-b) 표 이미지 렌더 (+ 07:10/수동 실행이면 채널 전송, 하루 1회)")
-    try:
-        png = P.render_report_image(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])
-        send = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")
-        marker = os.path.join(APP, "reports", f".tg_sent_{ymd}")  # 발송완료 표시(레포 커밋→다음 실행 중복차단)
-        already = os.path.exists(marker)
-        if png and send and not already:
-            cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
-            if P.send_telegram(png, cap):
-                os.makedirs(os.path.dirname(marker), exist_ok=True); open(marker, "w").close()
-                log("  전송 완료 — 오늘치 발송 잠금 생성")
-        elif already:
-            log("  오늘 이미 발송함 — 중복 방지 스킵")
-        elif not png:
-            log("  변화 없음 — 이미지/전송 없음")
-        else:
-            log("  전송 시각 아님 — 이미지 렌더/저장만")
-    except Exception as e:
-        log(f"  이미지/텔레그램 실패: {type(e).__name__}: {e}")
+    log("1-b) 이미지 렌더 + 채널 전송 (07:10/수동, 각 채널 하루 1회)")
+    send = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")
+    cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
+    def deliver(label, png, tok, chat, marker_name):
+        try:
+            if not png: log(f"  [{label}] 변화 없음 — 스킵"); return
+            if not (tok and chat): log(f"  [{label}] 대상 미설정 — 스킵"); return
+            if not send: log(f"  [{label}] 전송 시각 아님 — 렌더만"); return
+            m = os.path.join(APP, "reports", marker_name)
+            if os.path.exists(m): log(f"  [{label}] 오늘 이미 발송 — 스킵"); return
+            if P.send_telegram(png, cap, token=tok, chat=chat):
+                os.makedirs(os.path.dirname(m), exist_ok=True); open(m, "w").close()
+                log(f"  [{label}] 전송 완료 — 잠금 생성")
+        except Exception as e:
+            log(f"  [{label}] 실패: {type(e).__name__}: {e}")
+    # 채널1: 기존(색상·가로) @pefscreener
+    deliver("채널1", P.render_report_image(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"]),
+            os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID"), f".tg_sent_{ymd}")
+    # 채널2: 신규(무채색·모바일 세로)
+    deliver("채널2", P.render_report_image_mobile(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"]),
+            os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_CHAT_ID2"), f".tg_sent2_{ymd}")
     log("2) 최근 5거래일 롤링")
     try: P.rolling_report(today, 5)    # pdf_rolling5_YYYYMMDD.xlsx
     except Exception as e: log(f"  롤링 실패: {type(e).__name__}: {e}")
@@ -58,8 +60,8 @@ def main():
 
     # 4) 오늘 산출물 업로드
     targets = []
-    for pat in (f"pdf_change_{ymd}.xlsx", f"pdf_change_{ymd}.png", f"pdf_weekly_{ymd}.xlsx",
-                f"pdf_rolling5_{ymd}.xlsx", f"portfolio_{ymd}.png"):
+    for pat in (f"pdf_change_{ymd}.xlsx", f"pdf_change_{ymd}.png", f"pdf_change_m_{ymd}.png",
+                f"pdf_weekly_{ymd}.xlsx", f"pdf_rolling5_{ymd}.xlsx", f"portfolio_{ymd}.png"):
         targets += glob.glob(os.path.join(APP, pat))
     if not targets:
         log("업로드할 파일 없음"); return

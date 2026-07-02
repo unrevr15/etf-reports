@@ -50,8 +50,10 @@ jobs:
           TZ: Asia/Seoul
           RCLONE_REMOTE: ${{ vars.RCLONE_REMOTE || 'gdrive:etf_reports' }}
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}   # 전체매매금액(상장좌수)·비중(순자산) 계산용
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}     # 표 이미지 텔레그램 전송(있을 때만)
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }} # 채널: @pefscreener
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}     # 채널1(색상·가로): @pefscreener
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TOKEN2: ${{ secrets.TELEGRAM_TOKEN2 }}   # 채널2(무채색·모바일): 신규 방(있을 때만)
+          TELEGRAM_CHAT_ID2: ${{ secrets.TELEGRAM_CHAT_ID2 }}
           # 07:10 실행 또는 수동실행일 때만 채널 전송(나머지 실행은 렌더/저장만 → 채널 도배 방지)
           TELEGRAM_SEND: ${{ github.event.schedule == '10 22 * * *' || github.event_name == 'workflow_dispatch' }}
         run: python cloud/run_daily.py

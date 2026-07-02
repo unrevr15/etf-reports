@@ -684,9 +684,76 @@ def render_report_image(groups, today, prev, status_line="", title=None,
     fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return out_png
 
-def send_telegram(png_path, caption=""):
-    """TELEGRAM_TOKEN/TELEGRAM_CHAT_ID 있으면 이미지 전송(sendPhoto→실패 시 sendDocument)."""
-    tok = os.environ.get("TELEGRAM_TOKEN"); chat = os.environ.get("TELEGRAM_CHAT_ID")
+def render_report_image_mobile(groups, today, prev, status_line="", title=None,
+                               lbl_cur="당일", lbl_prev="전영업일", out_png=None):
+    """모바일용 세로 리스트(무채색): ETF명 → 매수 → 매도 순으로 쌓음. 반환 경로 or None."""
+    _setup_mpl_font()
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec
+    caps = [g for g in groups if g["state"] == "captured" and (g["buy"] or g["sell"])]
+    if not caps:
+        return None
+    td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
+    def _chc(r): return f"{int(r['변화']):+,} ({int(r['전일수량']):,}→{int(r['당일수량']):,})"
+    def _eok(r):
+        a = r.get("전체금액"); return "-" if a is None else f"{a/1e8:+,.1f}억"
+    def _pct(r):
+        p = r.get("비중"); return "-" if p is None else f"{p:+.2f}%"
+    # 각 ETF 표 행수 = 컬럼헤더1 + (매수라벨1 + 매수행) + (매도라벨1 + 매도행)
+    counts = [1 + 1 + max(1, len(g["buy"])) + 1 + max(1, len(g["sell"])) for g in caps]
+    ratios = [c + 1.3 for c in counts]
+    fig_h = max(4.0, 1.1 + sum(r * 0.30 for r in ratios))
+    fig = plt.figure(figsize=(7.2, fig_h), dpi=200)   # 세로로 좁게(모바일)
+    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.5,
+                  top=1 - 1.0 / fig_h, bottom=0.15 / fig_h, left=0.02, right=0.98)
+    GRID = "#B0B0B0"; SECT = "#E6E6E6"; HDR = "#CFCFCF"
+    for gi, g in enumerate(caps):
+        ax = fig.add_subplot(gs[gi]); ax.axis("off")
+        buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
+        aum = g.get("aum")
+        ttl = f"■ {g['etf']} ({g['am']})" + (f"  순자산 약 {aum/1e8:,.0f}억" if aum else "")
+        ax.set_title(ttl, loc="left", fontsize=10.5, fontweight="bold", color="black", pad=4)
+        cells = []; styles = []
+        cells.append(["종목", "변화(전→당)", "금액", "비중"]); styles.append("hdr")
+        cells.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
+        for b in (buy or [None]):
+            if b is None: cells.append(["(없음)", "", "", ""])
+            else:
+                tag = " (신규)" if b["구분"] == "신규편입" else ""
+                cells.append([b["종목명"] + tag, _chc(b), _eok(b), _pct(b)])
+            styles.append("data")
+        cells.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
+        for s in (sell or [None]):
+            if s is None: cells.append(["(없음)", "", "", ""])
+            else:
+                tag = " (편출)" if s["구분"] == "편출" else ""
+                cells.append([s["종목명"] + tag, _chc(s), _eok(s), _pct(s)])
+            styles.append("data")
+        tbl = ax.table(cellText=cells, cellLoc="left", loc="upper center",
+                       colWidths=[0.34, 0.34, 0.17, 0.15])
+        tbl.auto_set_font_size(False); tbl.set_fontsize(9.5); tbl.scale(1, 1.45)
+        for (r0, c0), cell in tbl.get_celld().items():
+            cell.set_edgecolor(GRID); cell.set_linewidth(0.6)
+            t = cell.get_text(); st = styles[r0]
+            if st == "hdr":
+                cell.set_facecolor(HDR); t.set_fontweight("bold")
+            elif st == "sect":
+                cell.set_facecolor(SECT); t.set_fontweight("bold")
+            else:
+                cell.set_facecolor("white")
+                s0 = t.get_text()
+                if c0 == 0 and len(s0) > 11:   # 긴 종목명 자동 축소
+                    t.set_fontsize(max(6.5, min(9.5, 9.5 * 11 / len(s0))))
+    sup = title or f"코스닥 액티브 ETF PDF 변화\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
+    fig.suptitle(sup + (f"\n{status_line}" if status_line else ""),
+                 fontsize=11, fontweight="bold", y=1 - 0.1 / fig_h, va="top")
+    out_png = out_png or os.path.join(BASE, f"pdf_change_m_{today.strftime('%Y%m%d')}.png")
+    fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
+    return out_png
+
+def send_telegram(png_path, caption="", token=None, chat=None):
+    """이미지 전송(sendPhoto→실패 시 sendDocument). token/chat 미지정 시 환경변수 사용."""
+    tok = token or os.environ.get("TELEGRAM_TOKEN"); chat = chat or os.environ.get("TELEGRAM_CHAT_ID")
     if not (tok and chat):
         print("  [텔레그램] 토큰/챗ID 미설정 — 전송 스킵"); return False
     if not (png_path and os.path.exists(png_path)):
