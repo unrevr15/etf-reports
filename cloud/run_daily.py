@@ -30,13 +30,19 @@ def main():
 
     log("1) 일일 리포트")
     ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
-    log("1-b) 표 이미지 렌더 (+ 07:30/수동 실행이면 채널 전송)")
+    log("1-b) 표 이미지 렌더 (+ 07:10/수동 실행이면 채널 전송, 하루 1회)")
     try:
         png = P.render_report_image(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])
         send = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")
-        if png and send:
+        marker = os.path.join(APP, "reports", f".tg_sent_{ymd}")  # 발송완료 표시(레포 커밋→다음 실행 중복차단)
+        already = os.path.exists(marker)
+        if png and send and not already:
             cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
-            P.send_telegram(png, cap)
+            if P.send_telegram(png, cap):
+                os.makedirs(os.path.dirname(marker), exist_ok=True); open(marker, "w").close()
+                log("  전송 완료 — 오늘치 발송 잠금 생성")
+        elif already:
+            log("  오늘 이미 발송함 — 중복 방지 스킵")
         elif not png:
             log("  변화 없음 — 이미지/전송 없음")
         else:
