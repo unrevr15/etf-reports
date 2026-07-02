@@ -686,67 +686,58 @@ def render_report_image(groups, today, prev, status_line="", title=None,
 
 def render_report_image_mobile(groups, today, prev, status_line="", title=None,
                                lbl_cur="당일", lbl_prev="전영업일", out_png=None):
-    """모바일용 세로 리스트(무채색): ETF명 → 매수 → 매도 순으로 쌓음. 반환 경로 or None."""
+    """모바일 세로 카드형(무채색). 종목당 2줄: '이름 … 금액' / '변화주·전→당·비중'.
+    폭을 좁게(≈폰 화면) 잡아 텔레그램 축소 시에도 글자가 크게 보이게."""
     _setup_mpl_font()
     import matplotlib.pyplot as plt
-    from matplotlib.gridspec import GridSpec
     caps = [g for g in groups if g["state"] == "captured" and (g["buy"] or g["sell"])]
     if not caps:
         return None
     td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
-    def _chc(r): return f"{int(r['변화']):+,} ({int(r['전일수량']):,}→{int(r['당일수량']):,})"
-    def _eok(r):
+    # 줄 수 계산(각 종목 2줄)
+    def etf_units(g): return 1 + 1 + max(1, len(g["buy"])) * 2 + 1 + max(1, len(g["sell"])) * 2 + 0.6
+    total = 3.2 + sum(etf_units(g) for g in caps)
+    W, LH = 4.9, 0.245          # 폭 4.9인치(좁게), 줄당 0.245인치
+    fig = plt.figure(figsize=(W, total * LH + 0.2), dpi=210)
+    ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off"); ax.set_xlim(0, 1); ax.set_ylim(0, total)
+    LX, RX = 0.035, 0.965
+    y = total - 0.3
+    def ln(dy=1.0):
+        nonlocal y; y -= dy
+    ax.text(0.5, y, "코스닥 액티브 ETF PDF 변화", ha="center", va="top", fontsize=12.5, fontweight="bold"); ln()
+    ax.text(0.5, y, f"{lbl_cur} {td}  vs  {lbl_prev} {pdd}", ha="center", va="top", fontsize=8.5, color="#333"); ln()
+    if status_line:
+        ax.text(0.5, y, status_line, ha="center", va="top", fontsize=8, color="#666"); ln()
+    ln(0.2)
+    def eok(r):
         a = r.get("전체금액"); return "-" if a is None else f"{a/1e8:+,.1f}억"
-    def _pct(r):
-        p = r.get("비중"); return "-" if p is None else f"{p:+.2f}%"
-    # 각 ETF 표 행수 = 컬럼헤더1 + (매수라벨1 + 매수행) + (매도라벨1 + 매도행)
-    counts = [1 + 1 + max(1, len(g["buy"])) + 1 + max(1, len(g["sell"])) for g in caps]
-    ratios = [c + 1.3 for c in counts]
-    fig_h = max(4.0, 1.1 + sum(r * 0.30 for r in ratios))
-    fig = plt.figure(figsize=(7.2, fig_h), dpi=200)   # 세로로 좁게(모바일)
-    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.5,
-                  top=1 - 1.0 / fig_h, bottom=0.15 / fig_h, left=0.02, right=0.98)
-    GRID = "#B0B0B0"; SECT = "#E6E6E6"; HDR = "#CFCFCF"
-    for gi, g in enumerate(caps):
-        ax = fig.add_subplot(gs[gi]); ax.axis("off")
+    def entry(r):
+        nonlocal y
+        tag = " (신규)" if r["구분"] == "신규편입" else (" (편출)" if r["구분"] == "편출" else "")
+        nm = r["종목명"] + tag
+        fs = 11 if len(nm) <= 12 else max(8, 11 * 12 / len(nm))
+        ax.text(LX + 0.02, y, nm, ha="left", va="top", fontsize=fs, fontweight="bold")
+        ax.text(RX, y, eok(r), ha="right", va="top", fontsize=11, fontweight="bold"); ln()
+        p = r.get("비중"); pc = "-" if p is None else f"{p:+.2f}%"
+        det = f"{int(r['변화']):+,}주  ·  {int(r['전일수량']):,}→{int(r['당일수량']):,}  ·  {pc}"
+        ax.text(LX + 0.04, y, det, ha="left", va="top", fontsize=8.8, color="#555"); ln()
+    def section(label, rows):
+        nonlocal y
+        ax.text(LX, y, label, ha="left", va="top", fontsize=9.8, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", fc="#E6E6E6", ec="none")); ln()
+        if not rows:
+            ax.text(LX + 0.04, y, "(없음)", ha="left", va="top", fontsize=9, color="#999"); ln(); return
+        for r in rows:
+            entry(r)
+    for g in caps:
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
         aum = g.get("aum")
-        ttl = f"■ {g['etf']} ({g['am']})" + (f"  순자산 약 {aum/1e8:,.0f}억" if aum else "")
-        ax.set_title(ttl, loc="left", fontsize=10.5, fontweight="bold", color="black", pad=4)
-        cells = []; styles = []
-        cells.append(["종목", "변화(전→당)", "금액", "비중"]); styles.append("hdr")
-        cells.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
-        for b in (buy or [None]):
-            if b is None: cells.append(["(없음)", "", "", ""])
-            else:
-                tag = " (신규)" if b["구분"] == "신규편입" else ""
-                cells.append([b["종목명"] + tag, _chc(b), _eok(b), _pct(b)])
-            styles.append("data")
-        cells.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
-        for s in (sell or [None]):
-            if s is None: cells.append(["(없음)", "", "", ""])
-            else:
-                tag = " (편출)" if s["구분"] == "편출" else ""
-                cells.append([s["종목명"] + tag, _chc(s), _eok(s), _pct(s)])
-            styles.append("data")
-        tbl = ax.table(cellText=cells, cellLoc="left", loc="upper center",
-                       colWidths=[0.34, 0.34, 0.17, 0.15])
-        tbl.auto_set_font_size(False); tbl.set_fontsize(9.5); tbl.scale(1, 1.45)
-        for (r0, c0), cell in tbl.get_celld().items():
-            cell.set_edgecolor(GRID); cell.set_linewidth(0.6)
-            t = cell.get_text(); st = styles[r0]
-            if st == "hdr":
-                cell.set_facecolor(HDR); t.set_fontweight("bold")
-            elif st == "sect":
-                cell.set_facecolor(SECT); t.set_fontweight("bold")
-            else:
-                cell.set_facecolor("white")
-                s0 = t.get_text()
-                if c0 == 0 and len(s0) > 11:   # 긴 종목명 자동 축소
-                    t.set_fontsize(max(6.5, min(9.5, 9.5 * 11 / len(s0))))
-    sup = title or f"코스닥 액티브 ETF PDF 변화\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
-    fig.suptitle(sup + (f"\n{status_line}" if status_line else ""),
-                 fontsize=11, fontweight="bold", y=1 - 0.1 / fig_h, va="top")
+        ax.plot([LX, RX], [y + 0.15, y + 0.15], color="#CFCFCF", lw=0.8)  # 구분선
+        ax.text(LX, y, f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else ""),
+                ha="left", va="top", fontsize=10.5, fontweight="bold"); ln()
+        section(f"▼ 매수 {len(buy)}", buy)
+        section(f"▼ 매도 {len(sell)}", sell)
+        ln(0.6)
     out_png = out_png or os.path.join(BASE, f"pdf_change_m_{today.strftime('%Y%m%d')}.png")
     fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return out_png
