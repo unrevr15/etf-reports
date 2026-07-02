@@ -695,16 +695,16 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
     if not caps:
         return None
     td = today.strftime("%Y-%m-%d"); pdd = prev.strftime("%Y-%m-%d")
-    def _chc(r): return f"{int(r['변화']):+,} ({int(r['전일수량']):,}→{int(r['당일수량']):,})"
+    def _chc(r): return f"{int(r['변화']):+,}\n{int(r['전일수량']):,}→{int(r['당일수량']):,}"  # 2줄(변화/전→당)
     def _eok(r):
         a = r.get("전체금액"); return "-" if a is None else f"{a/1e8:+,.1f}억"
     def _pct(r):
         p = r.get("비중"); return "-" if p is None else f"{p:+.2f}%"
     counts = [1 + 1 + max(1, len(g["buy"])) + 1 + max(1, len(g["sell"])) for g in caps]
     ratios = [c + 1.3 for c in counts]
-    fig_h = max(4.0, 1.1 + sum(r * 0.36 for r in ratios))
-    fig = plt.figure(figsize=(6.6, fig_h), dpi=200)
-    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.42,
+    fig_h = max(4.0, 1.1 + sum(r * 0.50 for r in ratios))
+    fig = plt.figure(figsize=(5.3, fig_h), dpi=200)   # 폭 좁게
+    gs = GridSpec(len(caps), 1, height_ratios=ratios, hspace=0.35,
                   top=1 - 1.0 / fig_h, bottom=0.1 / fig_h, left=0.006, right=0.994)  # 양옆 여백 최소
     GRID = "#8A8A8A"; SECT = "#DEDEDE"; HDR = "#C4C4C4"
     for gi, g in enumerate(caps):
@@ -712,7 +712,7 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
         aum = g.get("aum")
         ttl = f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else "")
-        ax.set_title(ttl, loc="left", fontsize=11.5, fontweight="bold", color="black", pad=3)
+        ax.set_title(ttl, loc="left", fontsize=12, fontweight="bold", color="black", pad=3)
         cells = []; styles = []
         cells.append(["종목", "변화(전→당)", "금액", "비중"]); styles.append("hdr")
         cells.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
@@ -730,20 +730,20 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
                 cells.append([s["종목명"] + tag, _chc(s), _eok(s), _pct(s)])
             styles.append("data")
         tbl = ax.table(cellText=cells, cellLoc="left", loc="upper center",
-                       colWidths=[0.33, 0.30, 0.20, 0.16])   # 합≈0.99 → 폭 꽉 채움
-        tbl.auto_set_font_size(False); tbl.set_fontsize(10.5); tbl.scale(1, 1.55)
+                       colWidths=[0.36, 0.25, 0.21, 0.17])   # 합≈0.99, 변화칸 좁게(2줄)
+        tbl.auto_set_font_size(False); tbl.set_fontsize(12); tbl.scale(1, 2.3)
         for (r0, c0), cell in tbl.get_celld().items():
             cell.set_edgecolor(GRID); cell.set_linewidth(0.7)
             t = cell.get_text(); st = styles[r0]
             if st == "hdr":
-                cell.set_facecolor(HDR); t.set_fontweight("bold"); t.set_fontsize(9.5)
+                cell.set_facecolor(HDR); t.set_fontweight("bold"); t.set_fontsize(10)
             elif st == "sect":
                 cell.set_facecolor(SECT); t.set_fontweight("bold")
             else:
                 cell.set_facecolor("white")
                 if c0 == 0:
                     s0 = t.get_text()
-                    if len(s0) > 10: t.set_fontsize(max(7.5, min(10.5, 10.5 * 10 / len(s0))))
+                    if len(s0) > 9: t.set_fontsize(max(8, min(12, 12 * 9 / len(s0))))
                     else: t.set_fontweight("bold")
     sup = title or f"코스닥 액티브 ETF PDF 변화\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
     fig.suptitle(sup + (f"\n{status_line}" if status_line else ""),
