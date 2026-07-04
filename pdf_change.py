@@ -257,6 +257,7 @@ def listed_shares():
     if _SHARES_CACHE: return _SHARES_CACHE
     key = _krx_key()
     if not key: return {}
+    got_sh = got_nav = False
     for off in range(1, 8):
         d = (datetime.now().date() - timedelta(days=off)).strftime("%Y%m%d")
         try:
@@ -265,13 +266,23 @@ def listed_shares():
             items = r.json().get("OutBlock_1", []) if r.status_code == 200 else []
         except Exception:
             items = []
-        if items:
+        if not items:
+            continue
+        if not got_sh:   # 좌수: 최신 영업일 데이터 사용
             for it in items:
                 code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
                 try: _SHARES_CACHE[code] = int(str(it.get("LIST_SHRS", "0")).replace(",", "") or 0)
                 except ValueError: pass
-                try: _NAV_CACHE[code] = int(str(it.get("INVSTASST_NETASST_TOTAMT", "0")).replace(",", "") or 0)
+            got_sh = True
+        if not got_nav:  # 순자산총액: KRX가 최신일엔 0으로 주는 경우 있음 → 값 있는 가장 최근 날 사용
+            navs = {}
+            for it in items:
+                code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
+                try: navs[code] = int(str(it.get("INVSTASST_NETASST_TOTAMT", "0")).replace(",", "") or 0)
                 except ValueError: pass
+            if any(navs.values()):
+                _NAV_CACHE.update(navs); got_nav = True
+        if got_sh and got_nav:
             break
     return _SHARES_CACHE
 
@@ -721,7 +732,7 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
             rows.append(["(없음)", "", "", ""] if s is None else
                         [s["종목명"] + (" (편출)" if s["구분"] == "편출" else ""), _chc(s), _eok(s), _pct(s)])
             styles.append("data")
-    HU = {"hdr": 1.0, "etf": 1.25, "sect": 1.0, "data": 1.75, "gap": 0.5}   # 행 높이(상대)
+    HU = {"hdr": 1.0, "etf": 1.25, "sect": 1.0, "data": 1.75, "gap": 1.4}   # 행 높이(상대)
     units = sum(HU[s] for s in styles)
     title_in = 1.05
     ax_in = units * 0.235
@@ -741,7 +752,7 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         elif st == "sect":
             cell.set_facecolor(SECT); t.set_fontweight("bold")
         elif st == "gap":
-            cell.set_facecolor("white"); cell.set_edgecolor("white")
+            cell.set_facecolor("white"); cell.set_linewidth(0)  # 선 자체를 안 그림(위 표 밑줄 보존)
         else:
             cell.set_facecolor("white")
             if c0 == 0:
