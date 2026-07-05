@@ -759,6 +759,8 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
                 s0 = t.get_text()
                 if len(s0) > 9: t.set_fontsize(max(8, min(12, 12 * 9 / len(s0))))
                 else: t.set_fontweight("bold")
+            elif c0 in (2, 3):   # 금액·비중 굵게
+                t.set_fontweight("bold")
     # ETF 배너를 표 위에 겹쳐 그림(칸 폭 무시, 잘림 방지)
     cum = 0.0
     for i, st in enumerate(styles):
