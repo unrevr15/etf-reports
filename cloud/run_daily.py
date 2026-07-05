@@ -30,8 +30,15 @@ def main():
 
     log("1) 일일 리포트")
     ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
-    log("1-b) 이미지 렌더 + 채널 전송 (07:10/수동, 각 채널 하루 1회)")
-    send = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")
+    log("1-b) 이미지 렌더 + 채널 전송 (아침 7:10~7:40, 완결/마감 시 하루 1회)")
+    send_win = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")   # 발송 후보 시각인가
+    now_t = datetime.datetime.now().time()            # TZ=Asia/Seoul (워크플로 env)
+    deadline = now_t >= datetime.time(7, 35)          # 7:35 넘으면 더 안 기다리고 되는대로 발송
+    LATE = ("TIGER", "기술이전")                        # 오후 게시 → 완결 판정서 제외
+    pend_now = [g["etf"] for g in ctx["groups"] if g["state"] == "pending" and not any(k in g["etf"] for k in LATE)]
+    send = send_win and (len(pend_now) == 0 or deadline)   # 완결(TIGER외 전부) 또는 마감이면 발송
+    if send_win and not send:
+        log(f"  발송 보류 — 대기: {', '.join(p.split()[0] for p in pend_now)} (7:35 마감 전 → 다음 회차 재시도)")
     cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
     def deliver(label, png, tok, chat, marker_name):
         try:
