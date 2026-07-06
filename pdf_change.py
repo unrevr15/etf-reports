@@ -323,7 +323,16 @@ def _qp(v):
         return float(v[0]), (float(v[1]) if v[1] not in (None, "") else None)
     return float(v), None
 
+def _px(nm, primary):
+    """종가: 운용사 평가금액 우선, 없으면 KRX 코스닥 종가 fallback."""
+    return primary if primary else krx_kosdaq_prices().get(nm)
+
+def _basket_total(m):
+    """맵의 1CU 총평가액(종가 fallback 포함) — 보유비중 분모."""
+    return sum(q * pr for q, pr in ((qp[0], _px(nm, qp[1])) for nm, qp in ((k, _qp(v)) for k, v in m.items())) if pr)
+
 def diff(tmap, pmap):
+    Tt = _basket_total(tmap); Tp = _basket_total(pmap)   # 당일·전일 총평가액(보유비중 분모)
     rows = []
     for nm in set(tmap) | set(pmap):
         tq, tp = _qp(tmap.get(nm, (0.0, None)))
@@ -334,11 +343,13 @@ def diff(tmap, pmap):
         elif ch > 0:             typ = "수량확대"
         elif ch < 0:             typ = "수량축소"
         else:                    typ = "유지"
-        price = tp if tp else pp          # 당일 종가 우선, 편출이면 전일 종가
-        if not price:                     # 운용사 평가금액 미제공(PLUS 등) → KRX 코스닥 종가로 보완
-            price = krx_kosdaq_prices().get(nm)
+        price = _px(nm, tp if tp else pp)   # 당일 종가 우선, 편출이면 전일 종가(둘 다 없으면 KRX)
         amt = round(ch * price) if price else None   # 변화금액(원) = 변화 × 종가
-        rows.append({"종목명": nm, "당일수량": tq, "전일수량": pq, "변화": ch, "구분": typ, "변화금액": amt})
+        tpe = _px(nm, tp); ppe = _px(nm, pp)
+        w_t = (tq * tpe / Tt * 100) if (tpe and Tt) else None   # 당일 보유비중(%)
+        w_p = (pq * ppe / Tp * 100) if (ppe and Tp) else None   # 전일 보유비중(%)
+        rows.append({"종목명": nm, "당일수량": tq, "전일수량": pq, "변화": ch, "구분": typ, "변화금액": amt,
+                     "보유비중당일": w_t, "보유비중전일": w_p})
     rows.sort(key=lambda r: -abs(r["변화"]))
     return rows
 
@@ -407,7 +418,9 @@ def run(today=None):
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
                                  (r["변화금액"] if r["변화금액"] is not None else ""),
                                  (r["전체금액"] if r["전체금액"] is not None else ""),
-                                 (r["비중"] if r.get("비중") is not None else "")])
+                                 (r["비중"] if r.get("비중") is not None else ""),
+                                 (round(r["보유비중전일"], 2) if r.get("보유비중전일") is not None else ""),
+                                 (round(r["보유비중당일"], 2) if r.get("보유비중당일") is not None else "")])
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
@@ -415,7 +428,7 @@ def run(today=None):
     csv_path = os.path.join(BASE, f"pdf_change_{t_ymd}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)","전체대비비중(%)"])
+        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)","전체대비비중(%)","보유비중전일(%)","보유비중당일(%)"])
         for r in csv_rows: w.writerow(r)
     xlsx_path = write_excel(groups, today, prev, status_line)
     print(f"\n[{status_line}]  변화 {len(csv_rows)}행 → {os.path.basename(xlsx_path)}")
@@ -574,21 +587,22 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
         for c in (7, 8, 9, 10, 11): ws.cell(row, c).fill = SELLHBG
         row += 1
         for c, t in zip((1, 2, 3, 4, 5, 7, 8, 9, 10, 11),
-                        ("종목명", "변화(1CU주)", "전체매매금액(원)", "전체대비비중", "전일→당일",
-                         "종목명", "변화(1CU주)", "전체매매금액(원)", "전체대비비중", "전일→당일")):
+                        ("종목명", "변화(1CU주)", "전체매매금액(원)", "보유비중(전→당)", "전일→당일",
+                         "종목명", "변화(1CU주)", "전체매매금액(원)", "보유비중(전→당)", "전일→당일")):
             cell = ws.cell(row, c, t); cell.font = Font(bold=True, size=9, color="595959")
             cell.alignment = Alignment(horizontal="center"); cell.border = border
         row += 1
         def put(r0, base, fnt, bg):
             nm = r0["종목명"]; pq = int(r0["전일수량"]); tq = int(r0["당일수량"])
-            amt = r0.get("전체금액"); pct = r0.get("비중")
+            amt = r0.get("전체금액")
+            wp = r0.get("보유비중전일"); wt = r0.get("보유비중당일")
+            hold = "-" if (wp is None and wt is None) else f"{(wp or 0):.2f}%→{(wt or 0):.2f}%"
             tag = "  (신규)" if r0["구분"] == "신규편입" else ("  (편출)" if r0["구분"] == "편출" else "")
             ws.cell(row, base, nm + tag).font = fnt
             cc = ws.cell(row, base + 1, int(r0["변화"])); cc.number_format = NUMFMT_UP; cc.font = fnt; cc.fill = bg; cc.alignment = Alignment(horizontal="right")
             ca = ws.cell(row, base + 2, amt if amt is not None else "-"); ca.font = fnt; ca.fill = bg; ca.alignment = Alignment(horizontal="right")
             if amt is not None: ca.number_format = AMTFMT
-            cp = ws.cell(row, base + 3, pct if pct is not None else "-"); cp.font = fnt; cp.fill = bg; cp.alignment = Alignment(horizontal="right")
-            if pct is not None: cp.number_format = PCTFMT
+            cp = ws.cell(row, base + 3, hold); cp.font = fnt; cp.fill = bg; cp.alignment = Alignment(horizontal="right")
             ws.cell(row, base + 4, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
         for i in range(max(len(buy), len(sell))):
             if i < len(buy): put(buy[i], 1, RED, BUYBG)
@@ -657,21 +671,24 @@ def render_report_image(groups, today, prev, status_line="", title=None,
               f"      매수 {len(buy)}  /  매도 {len(sell)}"
         ax.set_title(ttl, loc="left", fontsize=11, fontweight="bold", color="#1F3864", pad=6)
         n = max(len(buy), len(sell))
-        cols = ["매수 종목", "변화(전→당)", "금액", "비중", "", "매도 종목", "변화(전→당)", "금액", "비중"]
+        cols = ["매수 종목", "변화(전→당)", "금액", "보유비중", "", "매도 종목", "변화(전→당)", "금액", "보유비중"]
         def _chcell(r):   # 주수변화 + 전→당 한 칸에 (2줄)
             return f"{int(r['변화']):+,}\n{int(r['전일수량']):,}→{int(r['당일수량']):,}"
+        def _holdcell(r):  # 보유비중 전→당 (2줄)
+            wp = r.get("보유비중전일"); wt = r.get("보유비중당일")
+            return "-" if (wp is None and wt is None) else f"{(wp or 0):.2f}%\n→{(wt or 0):.2f}%"
         cell = []; ccol = []
         for i in range(n):
             row = [""] * 9; col = ["white"] * 9
             if i < len(buy):
                 b = buy[i]; tag = " (신규)" if b["구분"] == "신규편입" else ""
                 row[0] = b["종목명"] + tag; row[1] = _chcell(b); row[2] = _eok(b.get("전체금액"))
-                row[3] = f"{b['비중']:+.2f}%" if b.get("비중") is not None else "-"
+                row[3] = _holdcell(b)
                 for c in (0, 1, 2, 3): col[c] = RBG
             if i < len(sell):
                 s = sell[i]; tag = " (편출)" if s["구분"] == "편출" else ""
                 row[5] = s["종목명"] + tag; row[6] = _chcell(s); row[7] = _eok(s.get("전체금액"))
-                row[8] = f"{s['비중']:+.2f}%" if s.get("비중") is not None else "-"
+                row[8] = _holdcell(s)
                 for c in (5, 6, 7, 8): col[c] = BBG
             cell.append(row); ccol.append(col)
         tbl = ax.table(cellText=cell, colLabels=cols, cellColours=ccol,
@@ -709,11 +726,13 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
     def _chc(r): return f"{int(r['변화']):+,}\n{int(r['전일수량']):,}→{int(r['당일수량']):,}"  # 2줄(변화/전→당)
     def _eok(r):
         a = r.get("전체금액"); return "-" if a is None else f"{a/1e8:+,.1f}억"
-    def _pct(r):
-        p = r.get("비중"); return "-" if p is None else f"{p:+.2f}%"
+    def _hold(r):   # 보유비중 전→당 (2줄)
+        wp = r.get("보유비중전일"); wt = r.get("보유비중당일")
+        if wp is None and wt is None: return "-"
+        return f"{(wp or 0):.2f}%\n→{(wt or 0):.2f}%"
     # 연속 표(단일) 구성 → ETF 사이 빈 공간 제거
     rows = []; styles = []; banners = {}
-    rows.append(["종목", "변화(전→당)", "금액", "비중"]); styles.append("hdr")
+    rows.append(["종목", "변화(전→당)", "금액", "보유비중"]); styles.append("hdr")
     tot_b = tot_s = 0
     for gi, g in enumerate(caps):
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
@@ -725,12 +744,12 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         rows.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
         for b in (buy or [None]):
             rows.append(["(없음)", "", "", ""] if b is None else
-                        [b["종목명"] + (" (신규)" if b["구분"] == "신규편입" else ""), _chc(b), _eok(b), _pct(b)])
+                        [b["종목명"] + (" (신규)" if b["구분"] == "신규편입" else ""), _chc(b), _eok(b), _hold(b)])
             styles.append("data")
         rows.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
         for s in (sell or [None]):
             rows.append(["(없음)", "", "", ""] if s is None else
-                        [s["종목명"] + (" (편출)" if s["구분"] == "편출" else ""), _chc(s), _eok(s), _pct(s)])
+                        [s["종목명"] + (" (편출)" if s["구분"] == "편출" else ""), _chc(s), _eok(s), _hold(s)])
             styles.append("data")
     HU = {"hdr": 1.0, "etf": 1.25, "sect": 1.0, "data": 1.75, "gap": 1.4}   # 행 높이(상대)
     units = sum(HU[s] for s in styles)
