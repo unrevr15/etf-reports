@@ -130,9 +130,11 @@ def fetch_plus(n, ymd):
         for row in rows[hdr_i + 1:]:
             if not row or len(row) <= max(i_nm, i_q): continue
             nm = str(row[i_nm]).strip() if row[i_nm] else ""
-            if not nm or any(s in nm for s in SKIP): continue
+            if not nm: continue
             try: q = float(str(row[i_q]).replace(",", ""))
             except (ValueError, TypeError): continue
+            if any(s in nm for s in SKIP):
+                _note_cash(n, ymd, nm, q); continue   # PLUS는 현금라인 '보유수량'이 곧 현금액(원)
             if nm in out: out[nm][0] += q
             else: out[nm] = [q, None]   # PLUS 엑셀엔 평가금액 없음 → 종가 미상
     return out, actual
