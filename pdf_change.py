@@ -28,6 +28,13 @@ def prev_trading_day(d):
 SKIP = ("현금","원화예금","원화 예금","예수금","설정현금","CASH","원화","달러","USD","선물","원화현금")
 MIN_CHANGE = 3  # 이 미만(±1·±2주)의 수량확대/축소는 노이즈로 숨김. 신규편입·편출은 크기 무관 항상 표시.
 
+# ── 현금(dry powder) 캐시: 페처가 스킵하는 현금 라인 평가금액을 (id,ymd)별 1CU 현금으로 누적 ──
+_CASH_CACHE = {}
+_CASHWORDS = ("현금", "예금", "예수금")   # 선물/달러는 현금 아님 → 제외
+def _note_cash(key, ymd, nm, ev):
+    if ev and any(w in nm for w in _CASHWORDS):
+        _CASH_CACHE[(key, ymd)] = _CASH_CACHE.get((key, ymd), 0.0) + float(ev)
+
 # ── 스냅샷 저장소 ──────────────────────────────────────────────
 def load_snap():
     if os.path.exists(SNAP_FILE):
@@ -50,10 +57,12 @@ def fetch_samsungactive(prod_id, ymd):
     out = {}
     for it in d.get("list", []):
         nm = (it.get("secNm") or "").strip()
-        if not nm or any(s in nm for s in SKIP): continue
-        try:
-            q = float(str(it.get("applyQ", "0")).replace(",", ""))
-            ev = float(str(it.get("evalA", "0")).replace(",", ""))
+        if not nm: continue
+        try: ev = float(str(it.get("evalA", "0")).replace(",", ""))
+        except ValueError: ev = 0.0
+        if any(s in nm for s in SKIP):
+            _note_cash(prod_id, ymd, nm, ev); continue
+        try: q = float(str(it.get("applyQ", "0")).replace(",", ""))
         except ValueError: continue
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, (ev / q if q else None)]
@@ -81,10 +90,12 @@ def fetch_time(idx, ymd):
         for row in rows[1:]:
             if not row or len(row) <= max(i_nm, i_q): continue
             nm = str(row[i_nm]).strip() if row[i_nm] else ""
-            if not nm or any(s in nm for s in SKIP): continue
-            try:
-                q = float(str(row[i_q]).replace(",", ""))
-                ev = float(str(row[i_ev]).replace(",", "")) if i_ev is not None and row[i_ev] is not None else 0.0
+            if not nm: continue
+            try: ev = float(str(row[i_ev]).replace(",", "")) if i_ev is not None and row[i_ev] is not None else 0.0
+            except (ValueError, TypeError): ev = 0.0
+            if any(s in nm for s in SKIP):
+                _note_cash(idx, ymd, nm, ev); continue
+            try: q = float(str(row[i_q]).replace(",", ""))
             except (ValueError, TypeError): continue
             if nm in out: out[nm][0] += q
             else: out[nm] = [q, (ev / q if (q and ev) else None)]
@@ -152,10 +163,12 @@ def fetch_rise(stid, ymd):
         vals = [str(x).strip() for x in t.iloc[i].tolist()]
         if len(vals) <= max(i_nm, i_q): continue
         nm = vals[i_nm]
-        if not nm or nm == "nan" or any(s in nm for s in SKIP): continue
-        try:
-            q = float(vals[i_q].replace(",", ""))
-            ev = float(vals[i_ev].replace(",", "")) if i_ev is not None else 0.0
+        if not nm or nm == "nan": continue
+        try: ev = float(vals[i_ev].replace(",", "")) if (i_ev is not None and i_ev < len(vals)) else 0.0
+        except ValueError: ev = 0.0
+        if any(s in nm for s in SKIP):
+            _note_cash(stid, ymd, nm, ev); continue
+        try: q = float(vals[i_q].replace(",", ""))
         except ValueError: continue
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, (ev / q if (q and ev) else None)]
@@ -179,10 +192,12 @@ def fetch_tiger(isin, ymd):
         return {}, ""
     for _, row in df.iterrows():
         nm = str(row[1]).strip()  # col0=종목코드,col1=종목명,col2=수량,col3=평가금액,col4=비중
-        if not nm or nm == "nan" or any(sk in nm for sk in SKIP): continue
-        try:
-            q = float(str(row[2]).replace(",", ""))
-            ev = float(str(row[3]).replace(",", ""))
+        if not nm or nm == "nan": continue
+        try: ev = float(str(row[3]).replace(",", ""))
+        except (ValueError, TypeError): ev = 0.0
+        if any(sk in nm for sk in SKIP):
+            _note_cash(isin, ymd, nm, ev); continue
+        try: q = float(str(row[2]).replace(",", ""))
         except (ValueError, TypeError): continue
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, (ev / q if (q and ev) else None)]
@@ -296,6 +311,17 @@ def etf_navtotal(e):
     """ETF 순자산총액(원, KRX 공식) = 비중 분모. 미상이면 0."""
     listed_shares()  # 캐시 채움(좌수와 동일 API)
     return _NAV_CACHE.get(e.get("krx", ""), 0)
+
+def etf_cash_percu(e, ymd):
+    """1CU 현금(원) — PDF 현금라인 평가금액. 페처가 채운 캐시에서. 미상이면 None."""
+    return _CASH_CACHE.get((e.get("id"), ymd))
+
+def _cashlabel(g):
+    """배너용 현금 문구: '현금 61억(1.2%)'. 미상이면 빈 문자열."""
+    c = g.get("cash")
+    if c is None: return ""
+    r = g.get("cashr")
+    return f"현금 {c/1e8:,.0f}억" + (f"({r}%)" if r is not None else "")
 
 def krx_kosdaq_prices():
     """{종목명: 종가} — KRX 코스닥 최근 영업일 종가. 운용사 평가금액 미제공 종목의 종가 fallback."""
@@ -412,7 +438,11 @@ def run(today=None):
                 r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
-            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell, "aum": aum})
+            cpc = etf_cash_percu(e, t_ymd); spc = stockval / nc if nc else 0   # 1CU 현금·주식
+            cash = round(cpc * nc) if (cpc is not None and nc) else None
+            cashr = round(cpc / (cpc + spc) * 100, 1) if (cpc is not None and (cpc + spc) > 0) else None
+            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell,
+                           "aum": aum, "cash": cash, "cashr": cashr})
             for r in rows:
                 csv_rows.append([e["name"], e["am"], t_ymd, p_ymd, r["구분"], r["종목명"],
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
@@ -491,7 +521,11 @@ def _build_period_groups(first, last):
                 r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
-            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell, "aum": aum})
+            cpc = etf_cash_percu(e, l_ymd); spc = stockval / nc if nc else 0
+            cash = round(cpc * nc) if (cpc is not None and nc) else None
+            cashr = round(cpc / (cpc + spc) * 100, 1) if (cpc is not None and (cpc + spc) > 0) else None
+            groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell,
+                           "aum": aum, "cash": cash, "cashr": cashr})
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
@@ -570,7 +604,8 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
             ws.row_dimensions[row].height = 19; row += 2; continue
         aum = g.get("aum")
         aum_txt = f"      순자산 ≈ {aum/1e8:,.0f}억" if aum else ""
-        bc = ws.cell(row, 1, f"■ {etf}  ({am}){aum_txt}      {lbl_cur} {td}  vs  {lbl_prev} {pd_}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
+        _cl = _cashlabel(g); cash_txt = f"   ·   {_cl}" if _cl else ""
+        bc = ws.cell(row, 1, f"■ {etf}  ({am}){aum_txt}{cash_txt}      {lbl_cur} {td}  vs  {lbl_prev} {pd_}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
         bc.font = BANNERF; bc.alignment = Alignment(vertical="center")
         for c in range(1, NC + 1): ws.cell(row, c).fill = BANNERBG
         ws.row_dimensions[row].height = 19; row += 1
@@ -667,8 +702,9 @@ def render_report_image(groups, today, prev, status_line="", title=None,
         ax = fig.add_subplot(gs[gi]); ax.axis("off")
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
         aum = g.get("aum")
+        _cl = _cashlabel(g)
         ttl = f"■ {g['etf']}  ({g['am']})" + (f"   순자산 약 {aum/1e8:,.0f}억" if aum else "") + \
-              f"      매수 {len(buy)}  /  매도 {len(sell)}"
+              (f"   ·   {_cl}" if _cl else "") + f"      매수 {len(buy)}  /  매도 {len(sell)}"
         ax.set_title(ttl, loc="left", fontsize=11, fontweight="bold", color="#1F3864", pad=6)
         n = max(len(buy), len(sell))
         cols = ["매수 종목", "변화(전→당)", "금액", "보유비중", "", "매도 종목", "변화(전→당)", "금액", "보유비중"]
@@ -739,7 +775,9 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         tot_b += len(buy); tot_s += len(sell)
         if gi > 0: rows.append(["", "", "", ""]); styles.append("gap")
         aum = g.get("aum")
-        banners[len(rows)] = f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else "")
+        _cl = _cashlabel(g)
+        banners[len(rows)] = f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else "") + \
+                             (f"  ·  {_cl}" if _cl else "")
         rows.append(["", "", "", ""]); styles.append("etf")   # 배너는 표 위에 겹쳐 그림(잘림 방지)
         rows.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
         for b in (buy or [None]):
