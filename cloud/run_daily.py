@@ -30,11 +30,11 @@ def main():
 
     log("1) 일일 리포트")
     ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
-    log("1-b) 이미지 렌더 + 채널 전송 (아침 7:10~7:40, 완결/마감 시 하루 1회)")
+    log("1-b) 이미지 렌더 + 채널 전송 (아침 7:10~8:40, 완결되면 즉시·마감시 되는대로, 하루 1회)")
     send_win = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")   # 발송 후보 실행인가
     now_t = datetime.datetime.now().time()            # TZ=Asia/Seoul (워크플로 env)
     earliest = now_t >= datetime.time(7, 10)          # 7:10 이전엔 발송 안 함
-    deadline = now_t >= datetime.time(7, 35)          # 7:35 넘으면 더 안 기다리고 되는대로 발송
+    deadline = now_t >= datetime.time(8, 40)          # 8:40 넘으면 더 안 기다리고 되는대로 발송(운용사 늦게 게시 대비)
     LATE = ("TIGER", "기술이전")                        # 오후 게시 → 완결 판정서 제외
     pend_now = [g["etf"] for g in ctx["groups"] if g["state"] == "pending" and not any(k in g["etf"] for k in LATE)]
     send = send_win and earliest and (len(pend_now) == 0 or deadline)   # 7:10↑ & (완결 or 7:35마감)
