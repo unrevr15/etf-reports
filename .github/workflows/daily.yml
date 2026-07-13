@@ -2,11 +2,12 @@ name: ETF PDF 변화 일일 자동
 
 # 스케줄은 UTC 기준 (한국=UTC+9). 평일/휴장 판단은 스크립트가 알아서 함.
 #   UTC 21,22,23 → KST 06,07,08 / UTC 0,1 → KST 09,10 / UTC 7 → KST 16(늦게 뜨는 TIGER)
-#   UTC 22:10~22:40 → KST 07:10~07:40 = 전송 후보(완결되면 즉시 / 7:35 넘으면 되는대로, 하루 1회)
+#   UTC 22:10~23:40 → KST 07:10~08:40 = 전송 후보(완결되면 즉시 / 8:40 넘으면 되는대로, 하루 1회)
 on:
   schedule:
     - cron: "0 21,22,23 * * *"
-    - cron: "10,20,30,40 22 * * *"   # KST 07:10·20·30·40 — 채널 전송 후보(run_daily가 완결/마감 판정)
+    - cron: "10,20,30,40 22 * * *"   # KST 07:10·20·30·40 — 전송 후보
+    - cron: "20,40 23 * * *"         # KST 08:20·40 — 전송 후보(늦게 게시하는 운용사 대비)
     - cron: "0 0,1 * * *"
     - cron: "0 7 * * *"
   workflow_dispatch: {}   # 수동 실행 버튼(전송도 함)
@@ -56,7 +57,7 @@ jobs:
           TELEGRAM_CHAT_ID2: ${{ secrets.TELEGRAM_CHAT_ID2 }}
           # 아침 실행(06~10시)·수동은 전송 후보 → run_daily가 7:10↑ & 완결/7:35마감 판정(중복은 마커로 차단)
           # 7:10~7:40 통째 스킵돼도 08·09·10시 실행이 마감판정으로 자동 발송(GitHub 스킵 복구)
-          TELEGRAM_SEND: ${{ github.event.schedule == '10,20,30,40 22 * * *' || github.event.schedule == '0 21,22,23 * * *' || github.event.schedule == '0 0,1 * * *' || github.event_name == 'workflow_dispatch' }}
+          TELEGRAM_SEND: ${{ github.event.schedule == '10,20,30,40 22 * * *' || github.event.schedule == '20,40 23 * * *' || github.event.schedule == '0 21,22,23 * * *' || github.event.schedule == '0 0,1 * * *' || github.event_name == 'workflow_dispatch' }}
         run: python cloud/run_daily.py
 
       - name: 리포트를 레포에 커밋 (reports/)
