@@ -101,42 +101,28 @@ def fetch_time(idx, ymd):
             else: out[nm] = [q, (ev / q if (q and ev) else None)]
     return out, (ymd if out else "")  # 파일에 기준일 셀 없음 → 요청한 날짜로
 
-# ── fetcher: 한화(PLUS) 엑셀 다운로드 (날짜 파라미터) → {종목:수량}, 기준일 ──
+# ── fetcher: 한화(PLUS) — 사이트 API pdf/list (엑셀보다 안정적; 엑셀은 '날짜만 있고 빈' 상태로 옴) ──
 def fetch_plus(n, ymd):
-    import openpyxl, io
-    r = requests.get("https://www.plusetf.co.kr/excel/product/pdf",
-                     params={"n": n, "d": ymd, "title": "PLUS"},
+    # 사이트가 화면표시에 쓰는 API. content: {jmNm,amount(수량),ratio(비중%),wkdate(발행일)}. page 0-base.
+    r = requests.get("https://www.plusetf.co.kr/api/v1/product/pdf/list",
+                     params={"n": n, "d": ymd, "page": 0, "pageSize": 300},
                      headers={"User-Agent": UA, "Referer": f"https://www.plusetf.co.kr/product/detail?n={n}"},
                      timeout=20)
-    wb = openpyxl.load_workbook(io.BytesIO(r.content), read_only=True, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    actual = ""
-    hdr_i = None
-    for i, row in enumerate(rows):
-        cells = [str(c).strip() if c is not None else "" for c in row]
-        line = " ".join(cells)
-        if not actual:
-            import re as _re
-            m = _re.search(r"20\d\d[.\-]\d\d[.\-]\d\d", line)
-            if m: actual = m.group().replace("-", "").replace(".", "")
-        if "종목명" in cells and any("수량" in c for c in cells):
-            hdr_i = i
-            i_nm = cells.index("종목명")
-            i_q = next(j for j, c in enumerate(cells) if "수량" in c)
-            break
-    out = {}
-    if hdr_i is not None:
-        for row in rows[hdr_i + 1:]:
-            if not row or len(row) <= max(i_nm, i_q): continue
-            nm = str(row[i_nm]).strip() if row[i_nm] else ""
-            if not nm: continue
-            try: q = float(str(row[i_q]).replace(",", ""))
-            except (ValueError, TypeError): continue
-            if any(s in nm for s in SKIP):
-                _note_cash(n, ymd, nm, q); continue   # PLUS는 현금라인 '보유수량'이 곧 현금액(원)
-            if nm in out: out[nm][0] += q
-            else: out[nm] = [q, None]   # PLUS 엑셀엔 평가금액 없음 → 종가 미상
+    out = {}; actual = ""
+    try:
+        content = r.json().get("content") or []
+    except Exception:
+        return {}, ""
+    for it in content:
+        nm = str(it.get("jmNm") or "").strip()
+        if not nm: continue
+        actual = str(it.get("wkdate") or actual)
+        try: q = float(it.get("amount") or 0)
+        except (ValueError, TypeError): continue
+        if any(s in nm for s in SKIP):
+            _note_cash(n, ymd, nm, q); continue   # 현금라인 amount = 현금액(원)/CU
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, None]   # PLUS는 평가금액 없음 → 종가 미상(KRX fallback)
     return out, actual
 
 # ── fetcher: KB(RISE) 구성종목 엑셀(HTML-xls, searchDate) → {종목:수량}, 기준일 ──
