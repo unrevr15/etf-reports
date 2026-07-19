@@ -380,11 +380,19 @@ def _prev_key(kk, t_ymd, max_gap=10):
         return None
     return pk if gap <= max_gap else None
 
-def _fetch(e, ymd):
-    """모드 무관 통일 호출 → (map, 기준일YYYYMMDD)."""
-    if e["mode"] == "dateapi":
-        return e["fetch"](e["id"], ymd)
-    return e["fetch"](e["id"])  # snapshot: ymd 무시, 최신 반환
+def _fetch(e, ymd, tries=3):
+    """모드 무관 통일 호출 → (map, 기준일YYYYMMDD). 일시적 네트워크 오류는 재시도."""
+    import time
+    last = None
+    for i in range(tries):
+        try:
+            if e["mode"] == "dateapi":
+                return e["fetch"](e["id"], ymd)
+            return e["fetch"](e["id"])  # snapshot: ymd 무시, 최신 반환
+        except Exception as ex:
+            last = ex
+            if i < tries - 1: time.sleep(1.5 * (i + 1))
+    raise last
 
 
 def run(today=None):
