@@ -15,9 +15,10 @@ SNAP_FILE = os.path.join(BASE, "snapshots.json")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
 
 HOLIDAYS_2026 = {
-    "2026-01-01","2026-02-16","2026-02-17","2026-02-18","2026-03-02","2026-05-05",
-    "2026-05-25","2026-06-03","2026-08-17","2026-09-24","2026-09-25","2026-10-05",
+    "2026-01-01","2026-02-16","2026-02-17","2026-02-18","2026-03-02","2026-05-01","2026-05-05",
+    "2026-05-25","2026-06-03","2026-07-17","2026-08-17","2026-09-24","2026-09-25","2026-10-05",
     "2026-10-09","2026-12-25","2026-12-31",
+    # 07-17 제헌절: 전 운용사 PDF 부재로 휴장 확인(2026-07-20 진단). 05-01 근로자의날도 KRX 휴장.
 }
 def is_trading_day(d): return d.weekday() < 5 and d.strftime("%Y-%m-%d") not in HOLIDAYS_2026
 def prev_trading_day(d):
@@ -367,6 +368,18 @@ def diff(tmap, pmap):
     rows.sort(key=lambda r: -abs(r["변화"]))
     return rows
 
+def _prev_key(kk, t_ymd, max_gap=10):
+    """당일 이전 중 실제 보유한 가장 최근 날짜 = 사실상의 전영업일.
+    휴장일이 달력에서 누락돼도(예: 제헌절) 자동 보정. 너무 오래된 건 제외."""
+    cands = sorted(d for d in kk if d < t_ymd)
+    if not cands: return None
+    pk = cands[-1]
+    try:
+        gap = (datetime.strptime(t_ymd, "%Y%m%d") - datetime.strptime(pk, "%Y%m%d")).days
+    except ValueError:
+        return None
+    return pk if gap <= max_gap else None
+
 def _fetch(e, ymd):
     """모드 무관 통일 호출 → (map, 기준일YYYYMMDD)."""
     if e["mode"] == "dateapi":
@@ -405,7 +418,7 @@ def run(today=None):
                     status = f"대기 (현재 {ta or '빈값'})"
             except Exception as ex:
                 status = f"대기 (오류 {type(ex).__name__})"
-        ready = (t_ymd in snap[key]) and (p_ymd in snap[key])
+        ready = (t_ymd in snap[key]) and bool(_prev_key(snap[key], t_ymd))
         print(f"  {'✅' if ready else '⏳'} {e['name'][:18]:18} {status}")
     save_snap(snap)
 
@@ -413,9 +426,10 @@ def run(today=None):
     groups = []; csv_rows = []; done = 0; pend = []
     for e in ETFS:
         kk = snap.get(f"{e['am']}:{e['id']}", {})
-        if t_ymd in kk and p_ymd in kk:
+        pk = _prev_key(kk, t_ymd)            # 실제 전영업일(휴장 누락 자동 보정)
+        if t_ymd in kk and pk:
             done += 1
-            rows = [r for r in diff(kk[t_ymd], kk[p_ymd])
+            rows = [r for r in diff(kk[t_ymd], kk[pk])
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
             nc = num_cu(e)
@@ -432,7 +446,7 @@ def run(today=None):
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell,
                            "aum": aum, "cash": cash, "cashr": cashr})
             for r in rows:
-                csv_rows.append([e["name"], e["am"], t_ymd, p_ymd, r["구분"], r["종목명"],
+                csv_rows.append([e["name"], e["am"], t_ymd, pk, r["구분"], r["종목명"],
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
                                  (r["변화금액"] if r["변화금액"] is not None else ""),
                                  (r["전체금액"] if r["전체금액"] is not None else ""),
