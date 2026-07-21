@@ -256,6 +256,19 @@ def _krx_key():
         pass
     return ""
 
+def _krx_get(url, params, tries=3):
+    """KRX OpenAPI GET + 재시도(백오프). 일시적 장애로 금액·순자산이 통째로 빈칸되는 것 방지."""
+    import time
+    for i in range(tries):
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+        if i < tries - 1: time.sleep(1.5 * (i + 1))
+    return {}
+
 def listed_shares():
     """{KRX단축코드: 상장좌수} — 최근 영업일. 키 없거나 실패 시 빈 dict(전체금액 생략)."""
     if _SHARES_CACHE: return _SHARES_CACHE
@@ -264,12 +277,8 @@ def listed_shares():
     got_sh = got_nav = False
     for off in range(1, 8):
         d = (datetime.now().date() - timedelta(days=off)).strftime("%Y%m%d")
-        try:
-            r = requests.get("http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd",
-                             params={"AUTH_KEY": key, "basDd": d}, timeout=20)
-            items = r.json().get("OutBlock_1", []) if r.status_code == 200 else []
-        except Exception:
-            items = []
+        items = _krx_get("http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd",
+                         {"AUTH_KEY": key, "basDd": d}).get("OutBlock_1", [])
         if not items:
             continue
         if not got_sh:   # 좌수: 최신 영업일 데이터 사용
@@ -319,12 +328,8 @@ def krx_kosdaq_prices():
     if not key: return {}
     for off in range(1, 8):
         d = (datetime.now().date() - timedelta(days=off)).strftime("%Y%m%d")
-        try:
-            r = requests.get("http://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd",
-                             params={"AUTH_KEY": key, "basDd": d}, timeout=20)
-            items = r.json().get("OutBlock_1", []) if r.status_code == 200 else []
-        except Exception:
-            items = []
+        items = _krx_get("http://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd",
+                         {"AUTH_KEY": key, "basDd": d}).get("OutBlock_1", [])
         if items:
             for it in items:
                 try: _KRX_PX_CACHE[it["ISU_NM"].strip()] = float(str(it["TDD_CLSPRC"]).replace(",", ""))
@@ -441,7 +446,7 @@ def run(today=None):
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
             nc = num_cu(e)
-            stockval = sum(q * p for q, p in (_qp(v) for v in kk[t_ymd].values()) if p) * nc  # 보유주식총액(PDF, fallback)
+            stockval = _basket_total(kk[t_ymd]) * nc  # 보유주식총액(KRX 종가 fallback 포함 → PLUS 현금비율 정확)
             aum = etf_navtotal(e) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
             for r in rows:
                 r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
@@ -481,7 +486,8 @@ def run(today=None):
             print(f"[주간] 생성 실패: {type(ex).__name__}: {ex}")
 
     return {"groups": groups, "today": today, "prev": prev, "status_line": status_line,
-            "csv_path": csv_path, "xlsx_path": xlsx_path, "done": done, "pending": pend}
+            "csv_path": csv_path, "xlsx_path": xlsx_path, "done": done, "pending": pend,
+            "krx_ok": bool(listed_shares())}   # KRX 좌수 확보 여부(금액·순자산·현금 계산 가능한지)
 
 
 def week_trading_days(any_day):
@@ -524,7 +530,7 @@ def _build_period_groups(first, last):
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
             nc = num_cu(e)
-            stockval = sum(q * p for q, p in (_qp(v) for v in lm.values()) if p) * nc  # 보유주식총액(마지막일, fallback)
+            stockval = _basket_total(lm) * nc  # 보유주식총액(마지막일, KRX 종가 fallback 포함)
             aum = etf_navtotal(e) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
             for r in rows:
                 r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
