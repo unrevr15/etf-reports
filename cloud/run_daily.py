@@ -37,9 +37,12 @@ def main():
     deadline = now_t >= datetime.time(8, 40)          # 8:40 넘으면 더 안 기다리고 되는대로 발송(운용사 늦게 게시 대비)
     LATE = ("TIGER", "기술이전")                        # 오후 게시 → 완결 판정서 제외
     pend_now = [g["etf"] for g in ctx["groups"] if g["state"] == "pending" and not any(k in g["etf"] for k in LATE)]
-    send = send_win and earliest and (len(pend_now) == 0 or deadline)   # 7:10↑ & (완결 or 7:35마감)
+    krx_ok = ctx.get("krx_ok", True)                    # KRX 실패면 금액·순자산·현금 통째 빈칸 → 발송 보류
+    complete = (len(pend_now) == 0) and krx_ok
+    send = send_win and earliest and (complete or deadline)   # 7:10↑ & (완결 or 8:40마감)
     if send_win and earliest and not send:
-        log(f"  발송 보류 — 대기: {', '.join(p.split()[0] for p in pend_now)} (7:35 마감 전 → 다음 회차 재시도)")
+        why = list(dict.fromkeys([p.split()[0] for p in pend_now] + ([] if krx_ok else ["KRX(금액)"])))
+        log(f"  발송 보류 — 대기: {', '.join(why)} (마감 전 → 다음 회차 재시도)")
     cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
     def deliver(label, png, tok, chat, marker_name):
         try:
