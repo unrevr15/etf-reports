@@ -67,16 +67,25 @@ def main():
                        order=ORDER, cmp_days=CMP_DAYS)
     p3 = charts.chart3(rows, os.path.join(HERE, f"주간_종목별_{tag}.png"), note=note)
 
-    # 3) 전송
-    tok = os.getenv("TELEGRAM_TOKEN2") or os.getenv("TELEGRAM_TOKEN")
-    chat = os.getenv("WEEKLY_CHAT_ID") or os.getenv("TELEGRAM_DM_ID")
-    if not (tok and chat):
+    # 3) 전송 — 대상마다 봇 토큰이 다름(채널1=봇1, 채널2·DM=봇2)
+    T1, T2 = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_TOKEN2")
+    targets = []                                   # [(라벨, 토큰, chat_id)]
+    if os.getenv("WEEKLY_TO_CH1", "1") == "1" and T1 and os.getenv("TELEGRAM_CHAT_ID"):
+        targets.append(("채널1", T1, os.getenv("TELEGRAM_CHAT_ID")))          # @pefscreener
+    if os.getenv("WEEKLY_TO_CH2", "0") == "1" and T2 and os.getenv("TELEGRAM_CHAT_ID2"):
+        targets.append(("채널2", T2, os.getenv("TELEGRAM_CHAT_ID2")))         # 수급방
+    if os.getenv("WEEKLY_TO_DM", "1") == "1" and T2 and os.getenv("TELEGRAM_DM_ID"):
+        targets.append(("DM", T2, os.getenv("TELEGRAM_DM_ID")))
+    if not targets:
         log("전송 대상 미설정 — 파일만 생성"); return
     d0 = analyze.DAYS[max(0, len(analyze.DAYS) - 1 - CMP_DAYS)]
-    cap = (f"[주간] 코스닥 액티브 ETF 테마 비중변화\n"
-           f"{d0[:4]}-{d0[4:6]}/{d0[6:]} → {tag[4:6]}/{tag[6:]} ({CMP_DAYS}영업일)")
-    for i, p in enumerate([p for p in (p1, p2, p3) if p]):
-        P.send_telegram(p, cap if i == 0 else "", token=tok, chat=chat)
+    cap = (f"[주간] 코스닥 액티브 ETF  ·  {d0[:4]}-{d0[4:6]}/{d0[6:]} → {tag[4:6]}/{tag[6:]} ({CMP_DAYS}영업일)\n"
+           f"① 자금유출입·순자산   ② 테마 보유비중 변화   ③ 종목별 순매수")
+    pics = [p for p in (p1, p2, p3) if p]
+    for lab, tk, ch in targets:
+        log(f"  → {lab} 전송 ({len(pics)}장)")
+        for i, p in enumerate(pics):
+            P.send_telegram(p, cap if i == 0 else "", token=tk, chat=ch)
 
     # 4) 캐시 슬림화
     prune()
