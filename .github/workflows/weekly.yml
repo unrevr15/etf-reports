@@ -45,8 +45,8 @@ jobs:
           TELEGRAM_DM_ID: ${{ secrets.TELEGRAM_DM_ID }}         # 내 DM (봇2)
           # 발송처 on/off — 1이면 보냄
           WEEKLY_TO_CH1: "1"      # @pefscreener
-          WEEKLY_TO_CH2: "0"      # 수급방 (원하면 1로)
-          WEEKLY_TO_DM:  "1"      # 내 DM
+          WEEKLY_TO_CH2: "1"      # 수급방
+          WEEKLY_TO_DM:  "0"      # 내 DM (방 두 곳으로 가니 중복이라 끔)
         run: python analysis_20d/weekly_run.py
 
       - name: 캐시·리포트 커밋 (다음 주엔 새 5일치만 받도록)
