@@ -1,0 +1,62 @@
+name: ETF 주간 테마 리포트
+
+# 토요일 오전 (금요일 PDF 확정 후). UTC 00:00 토 = KST 09:00 토
+on:
+  schedule:
+    - cron: "0 0 * * 6"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write        # 캐시·리포트 커밋
+
+concurrency:
+  group: etf-weekly
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 시스템 패키지(한글폰트)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends fonts-nanum
+          sudo fc-cache -f
+
+      - name: 파이썬 라이브러리
+        run: pip install -r cloud/requirements.txt
+
+      - name: 주간 리포트 생성·전송
+        env:
+          TZ: Asia/Seoul
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+          TELEGRAM_TOKEN2: ${{ secrets.TELEGRAM_TOKEN2 }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          # 발송 대상: 방으로 보내려면 WEEKLY_CHAT_ID 시크릿을 그룹 id로 등록.
+          # 없으면 TELEGRAM_DM_ID(내 DM)로 감 — 처음 몇 주는 DM으로 확인 후 전환 권장.
+          WEEKLY_CHAT_ID: ${{ secrets.WEEKLY_CHAT_ID }}
+          TELEGRAM_DM_ID: ${{ secrets.TELEGRAM_DM_ID }}
+        run: python analysis_20d/weekly_run.py
+
+      - name: 캐시·리포트 커밋 (다음 주엔 새 5일치만 받도록)
+        run: |
+          mkdir -p reports
+          mv -f analysis_20d/주간_*.png reports/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f analysis_20d/*.json reports/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "변경 없음"
+          else
+            git commit -m "주간 테마 리포트 $(TZ=Asia/Seoul date +%Y-%m-%d)"
+            git pull --rebase --autostash || true
+            git push
+          fi
