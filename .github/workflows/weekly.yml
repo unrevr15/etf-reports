@@ -40,10 +40,13 @@ jobs:
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
           TELEGRAM_TOKEN2: ${{ secrets.TELEGRAM_TOKEN2 }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          # 발송 대상: 방으로 보내려면 WEEKLY_CHAT_ID 시크릿을 그룹 id로 등록.
-          # 없으면 TELEGRAM_DM_ID(내 DM)로 감 — 처음 몇 주는 DM으로 확인 후 전환 권장.
-          WEEKLY_CHAT_ID: ${{ secrets.WEEKLY_CHAT_ID }}
-          TELEGRAM_DM_ID: ${{ secrets.TELEGRAM_DM_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}     # 채널1 @pefscreener (봇1)
+          TELEGRAM_CHAT_ID2: ${{ secrets.TELEGRAM_CHAT_ID2 }}   # 채널2 수급방 (봇2)
+          TELEGRAM_DM_ID: ${{ secrets.TELEGRAM_DM_ID }}         # 내 DM (봇2)
+          # 발송처 on/off — 1이면 보냄
+          WEEKLY_TO_CH1: "1"      # @pefscreener
+          WEEKLY_TO_CH2: "0"      # 수급방 (원하면 1로)
+          WEEKLY_TO_DM:  "1"      # 내 DM
         run: python analysis_20d/weekly_run.py
 
       - name: 캐시·리포트 커밋 (다음 주엔 새 5일치만 받도록)
