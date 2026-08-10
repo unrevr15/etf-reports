@@ -4,7 +4,13 @@ name: ETF 주간 테마 리포트
 on:
   schedule:
     - cron: "0 0 * * 6"
-  workflow_dispatch: {}
+  # 수동 실행은 기본적으로 방에 안 보내고 DM으로만. 방까지 보내려면 force_send 체크.
+  workflow_dispatch:
+    inputs:
+      force_send:
+        description: "방(@pefscreener·수급방)으로 실제 발송"
+        type: boolean
+        default: false
 
 permissions:
   contents: write        # 캐시·리포트 커밋
@@ -44,9 +50,10 @@ jobs:
           TELEGRAM_CHAT_ID2: ${{ secrets.TELEGRAM_CHAT_ID2 }}   # 채널2 수급방 (봇2)
           TELEGRAM_DM_ID: ${{ secrets.TELEGRAM_DM_ID }}         # 내 DM (봇2)
           # 발송처 on/off — 1이면 보냄
-          WEEKLY_TO_CH1: "1"      # @pefscreener
-          WEEKLY_TO_CH2: "1"      # 수급방
-          WEEKLY_TO_DM:  "0"      # 내 DM (방 두 곳으로 가니 중복이라 끔)
+          # 정규 스케줄(토 09:00)이거나 force_send 켰을 때만 방으로. 그 외 수동실행은 DM만.
+          WEEKLY_TO_CH1: ${{ (github.event_name == 'schedule' || inputs.force_send) && '1' || '0' }}
+          WEEKLY_TO_CH2: ${{ (github.event_name == 'schedule' || inputs.force_send) && '1' || '0' }}
+          WEEKLY_TO_DM:  ${{ (github.event_name == 'schedule' || inputs.force_send) && '0' || '1' }}
         run: python analysis_20d/weekly_run.py
 
       - name: 캐시·리포트 커밋 (다음 주엔 새 5일치만 받도록)
