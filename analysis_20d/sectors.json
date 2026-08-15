@@ -933,5 +933,25 @@
 "code": "092460",
 "sector": "조선",
 "market": "KOSDAQ"
+},
+"하림지주": {
+"code": "003380",
+"sector": "식품",
+"market": "KOSDAQ"
+},
+"한국피아이엠": {
+"code": "448900",
+"sector": "자동차부품",
+"market": "KOSDAQ"
+},
+"코스맥스엔비티": {
+"code": "222040",
+"sector": "건강관리업체및서비스",
+"market": "KOSDAQ"
+},
+"PS일렉트로닉스": {
+"code": "332570",
+"sector": "핸드셋",
+"market": "KOSDAQ"
 }
 }
