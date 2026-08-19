@@ -55,6 +55,10 @@ jobs:
       - name: 실행(리포트 생성)
         env:
           TZ: Asia/Seoul
+          # 버퍼링을 끈다. 이게 없으면 15분 타임아웃으로 죽을 때 pdf_change.py 의
+          # print 가 통째로 버퍼에 남은 채 사라져서, 어디서 멈췄는지 로그에 안 남는다
+          # (2026-08-19 #330·#331 이 정확히 그래서 진단이 불가능했다).
+          PYTHONUNBUFFERED: "1"
           RCLONE_REMOTE: ${{ vars.RCLONE_REMOTE || 'gdrive:etf_reports' }}
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}   # 전체매매금액(상장좌수)·비중(순자산) 계산용
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}     # 채널1(색상·가로): @pefscreener
@@ -68,7 +72,7 @@ jobs:
           # 7:10~7:40 통째 스킵돼도 08·09·10시 실행이 마감판정으로 자동 발송(GitHub 스킵 복구)
           # 정규 스케줄에서만 발송. 수동 실행은 force_send를 켰을 때만.
           TELEGRAM_SEND: ${{ github.event.schedule == '10,20,30,40 22 * * *' || github.event.schedule == '20,40 23 * * *' || github.event.schedule == '0 21,22,23 * * *' || github.event.schedule == '0 0,1 * * *' || (github.event_name == 'workflow_dispatch' && inputs.force_send) }}
-        run: python cloud/run_daily.py
+        run: python -u cloud/run_daily.py
 
       - name: 리포트를 레포에 커밋 (reports/)
         run: |
@@ -76,7 +80,12 @@ jobs:
           mv -f pdf_change_*.xlsx pdf_change_*.png pdf_weekly_*.xlsx pdf_rolling*.xlsx portfolio_*.png reports/ 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # snapshots.json 도 같이 남긴다(.gitignore 의 *.json 때문에 -f 필요).
+          # 이게 없으면 러너가 매번 빈 스냅샷으로 시작해 '증분 캡처'가 이름만 남고,
+          # 하루 9회 실행이 전부 7개 ETF × (전일+당일) = 14회씩 새로 받는다.
+          # 재시도(3회 × 20초)까지 겹치면 15분 job 한도를 넘겨 통째로 취소된다.
           git add -f reports/
+          git add -f snapshots.json 2>/dev/null || true   # 캡처 전에 죽은 회차엔 파일이 없다
           if git diff --cached --quiet; then
             echo "변경 없음(휴장/미게시)"
           else
