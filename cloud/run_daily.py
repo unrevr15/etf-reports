@@ -30,6 +30,17 @@ def main():
 
     log("1) 일일 리포트")
     ctx = P.run(today)                  # pdf_change_YYYYMMDD.xlsx (+ 금/주말이면 주간 자동)
+    # ── 대시보드 업로드 ──────────────────────────────────
+    # 리포트가 만들어진 직후, 발송 여부와 무관하게 올린다.
+    # (발송은 완결 판정을 기다리지만 대시보드는 부분치라도 보이는 편이 낫다 —
+    #  같은 날 다시 실행되면 덮어쓴다)
+    try:
+        sys.path.insert(0, HERE)
+        import dashboard_push as DP
+        DP.push_from_csv(os.path.join(APP, "pdf_change_log.csv"), today.strftime("%Y-%m-%d"))
+    except Exception as e:
+        log(f"  대시보드 업로드 건너뜀: {e}")
+
     log("1-b) 이미지 렌더 + 채널 전송 (아침 7:10~8:40, 완결되면 즉시·마감시 되는대로, 하루 1회)")
     send_win = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")   # 발송 후보 실행인가
     now_t = datetime.datetime.now().time()            # TZ=Asia/Seoul (워크플로 env)
