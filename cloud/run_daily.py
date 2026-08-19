@@ -37,7 +37,9 @@ def main():
     try:
         sys.path.insert(0, HERE)
         import dashboard_push as DP
-        DP.push_from_csv(os.path.join(APP, "pdf_change_log.csv"), today.strftime("%Y-%m-%d"))
+        # 경로를 짐작하지 않는다 — pdf_change 가 방금 쓴 파일을 ctx 로 받아서 쓴다.
+        # (예전엔 없는 파일 이름을 넣어 두어 조용히 0건이었다)
+        DP.push_from_csv(ctx.get("csv_path"), today.strftime("%Y-%m-%d"))
     except Exception as e:
         log(f"  대시보드 업로드 건너뜀: {e}")
 

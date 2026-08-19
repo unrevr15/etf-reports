@@ -93,7 +93,8 @@ def push_from_csv(csv_path: str, base_date: str) -> int:
     import csv as _csv
     import io as _io
 
-    if not os.path.isfile(csv_path):
+    if not csv_path or not os.path.isfile(csv_path):
+        _log(f"CSV 를 찾지 못했습니다: {csv_path}")   # 조용히 0건이 되던 자리
         return 0
     ymd = base_date.replace("-", "")
     rows = []
@@ -104,6 +105,8 @@ def push_from_csv(csv_path: str, base_date: str) -> int:
             rows.append({
                 "etf": r.get("ETF"), "house": r.get("운용사"), "kind": r.get("구분"),
                 "name": r.get("종목명"), "today_qty": r.get("당일수량"),
-                "prev_qty": r.get("전일수량"), "delta": r.get("수량변화"),
+                "prev_qty": r.get("전일수량"),
+                # 열 이름이 '수량변화(1CU)' 다. '수량변화' 로 찾으면 늘 None 이 된다.
+                "delta": r.get("수량변화(1CU)") or r.get("수량변화"),
             })
     return push(rows, base_date)
