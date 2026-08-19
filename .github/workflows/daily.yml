@@ -28,7 +28,11 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15분은 최악의 경우와 거의 같아 구조적으로 빠듯했다:
+    #   7개 ETF × (전일+당일) × 재시도 3회 × 20초 ≈ 14분 + KRX + 렌더.
+    # 스냅샷이 레포에 남으면 평소엔 2분대로 끝나므로, 이 값은 '스냅샷이
+    # 비어 있는 첫 회차'를 살려 주기 위한 여유다.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
