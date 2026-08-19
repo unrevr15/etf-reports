@@ -61,6 +61,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_TOKEN2: ${{ secrets.TELEGRAM_TOKEN2 }}   # 채널2(무채색·모바일): 신규 방(있을 때만)
           TELEGRAM_CHAT_ID2: ${{ secrets.TELEGRAM_CHAT_ID2 }}
+          # 블로그 대시보드 업로드 (없으면 조용히 건너뜀 — 선택 기능)
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://blog-dashboard.memchipdash.workers.dev' }}
+          DASHBOARD_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
           # 아침 실행(06~10시)·수동은 전송 후보 → run_daily가 7:10↑ & 완결/7:35마감 판정(중복은 마커로 차단)
           # 7:10~7:40 통째 스킵돼도 08·09·10시 실행이 마감판정으로 자동 발송(GitHub 스킵 복구)
           # 정규 스케줄에서만 발송. 수동 실행은 force_send를 켰을 때만.
