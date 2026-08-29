@@ -953,5 +953,15 @@
 "code": "332570",
 "sector": "핸드셋",
 "market": "KOSDAQ"
+},
+"아이티센글로벌": {
+"code": "124500",
+"sector": "IT서비스",
+"market": "KOSDAQ"
+},
+"와이씨": {
+"code": "232140",
+"sector": "반도체와반도체장비",
+"market": "KOSDAQ"
 }
 }
