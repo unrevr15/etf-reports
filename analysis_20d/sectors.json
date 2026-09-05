@@ -963,5 +963,10 @@
 "code": "232140",
 "sector": "반도체와반도체장비",
 "market": "KOSDAQ"
+},
+"피노": {
+"code": "033790",
+"sector": "전기제품",
+"market": "KOSDAQ"
 }
 }
