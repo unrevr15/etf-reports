@@ -30,6 +30,51 @@ def _num(v):
         return None
 
 
+# ── 종목명 → 종목코드 ────────────────────────────────────────
+# 대시보드는 종목을 코드로 잇는다. 지금까지 이름만 보내서, 운용사 PDF 표기가
+# 대시보드의 이름표(DART 발음 이름)와 다르면 코드가 안 붙었다(51종목 실측).
+# 한국투자 종목마스터는 공개 파일이라 인증이 필요 없고 코스피·코스닥을 다 준다.
+# 실패하면 코드를 안 붙일 뿐, 업로드는 예전과 똑같이 돈다.
+_CODE_MAP: dict[str, str] = {}
+_CODE_TRIED = False
+_MASTER = "https://new.real.download.dws.co.kr/common/master/{}_code.mst.zip"
+
+
+def _name_to_code() -> dict:
+    global _CODE_TRIED
+    if _CODE_MAP or _CODE_TRIED:
+        return _CODE_MAP
+    _CODE_TRIED = True
+    import io as _io
+    import zipfile
+    dup = set()
+    for mk, tail in (("kospi", 228), ("kosdaq", 222)):
+        try:
+            with urllib.request.urlopen(_MASTER.format(mk), timeout=TIMEOUT) as r:
+                z = zipfile.ZipFile(_io.BytesIO(r.read()))
+            raw = z.read(z.namelist()[0]).decode("cp949", "replace")
+        except Exception as e:
+            print(f"[DASHBOARD] 종목마스터({mk}) 실패 — 코드 없이 올립니다: {e}", flush=True)
+            continue
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            head = line[: len(line) - tail]
+            code, name = head[:9].strip(), head[21:].strip()
+            if len(code) != 6 or not code.isdigit() or not name:
+                continue
+            # 같은 이름이 두 종목에 걸리면 어느 쪽인지 단정할 수 없다 → 둘 다 버린다
+            if name in _CODE_MAP and _CODE_MAP[name] != code:
+                dup.add(name)
+            else:
+                _CODE_MAP[name] = code
+    for n in dup:
+        _CODE_MAP.pop(n, None)
+    print(f"[DASHBOARD] 종목명→코드 {len(_CODE_MAP)}개"
+          + (f" (이름 중복 {len(dup)}개 제외)" if dup else ""), flush=True)
+    return _CODE_MAP
+
+
 def push(rows: list[dict], base_date: str) -> int:
     """rows: [{etf, house, kind, name, today_qty, prev_qty, delta}, ...]"""
     url = (os.getenv("DASHBOARD_URL") or "").rstrip("/")
@@ -37,22 +82,32 @@ def push(rows: list[dict], base_date: str) -> int:
     if not url or not token or not rows:
         return 0
 
+    cmap = _name_to_code()
     clean = []
+    hit = 0
     for r in rows:
         nm = str(r.get("name") or "").strip()
         if not nm:
             continue
+        # 행이 이미 코드를 들고 있으면 그것을 쓴다(TIGER 는 KSD 표에서 코드를 받아온다)
+        code = str(r.get("code") or "").strip() or cmap.get(nm, "")
+        if len(code) != 6 or not code.isdigit():
+            code = ""
+        if code:
+            hit += 1
         clean.append({
             "etf": str(r.get("etf") or "")[:40],
             "house": str(r.get("house") or "")[:20],
             "kind": str(r.get("kind") or "")[:12],     # 신규편입 / 전량제외 / 수량확대 / 수량축소
             "name": nm[:30],
+            "code": code or None,
             "today_qty": _num(r.get("today_qty")),
             "prev_qty": _num(r.get("prev_qty")),
             "delta": _num(r.get("delta")),
         })
     if not clean:
         return 0
+    print(f"[DASHBOARD] 코드 붙은 행 {hit}/{len(clean)}", flush=True)
 
     sent = 0
     for i in range(0, len(clean), CHUNK):
