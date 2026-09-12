@@ -968,5 +968,10 @@
 "code": "033790",
 "sector": "전기제품",
 "market": "KOSDAQ"
+},
+"SFA반도체": {
+"code": "036540",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
