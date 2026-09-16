@@ -240,8 +240,10 @@ ETFS = [
 ]
 
 # ── 상장좌수(KRX) → 전체 CU수 계산 ─────────────────────────────
-_SHARES_CACHE = {}
-_NAV_CACHE = {}   # {KRX단축코드: 순자산총액(원)} — 비중 분모(전체 ETF 액수)
+_SHARES_CACHE = {}   # {기준ymd: {KRX단축코드: 좌수}}
+_NAV_CACHE = {}      # {기준ymd: {KRX단축코드: 순자산총액(원)}} — 비중 분모(전체 ETF 액수)
+_SHARES_ASOF = {}    # {기준ymd: 실제로 읽어온 영업일} — 진단용
+_KRX_VOL_CACHE = {}  # {ymd: {종목명: 거래량(주)}} — 타당성 가드용
 _KRX_PX_CACHE = {}   # {종목명: 종가} — 운용사가 평가금액 미제공(예: PLUS)일 때 종가 fallback
 def _krx_key():
     k = os.getenv("KRX_API_KEY", "")
@@ -269,46 +271,62 @@ def _krx_get(url, params, tries=3):
         if i < tries - 1: time.sleep(1.5 * (i + 1))
     return {}
 
-def listed_shares():
-    """{KRX단축코드: 상장좌수} — 최근 영업일. 키 없거나 실패 시 빈 dict(전체금액 생략)."""
-    if _SHARES_CACHE: return _SHARES_CACHE
-    key = _krx_key()
-    if not key: return {}
-    got_sh = got_nav = False
-    for off in range(1, 8):
-        d = (datetime.now().date() - timedelta(days=off)).strftime("%Y%m%d")
-        items = _krx_get("http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd",
-                         {"AUTH_KEY": key, "basDd": d}).get("OutBlock_1", [])
-        if not items:
-            continue
-        if not got_sh:   # 좌수: 최신 영업일 데이터 사용
-            for it in items:
-                code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
-                try: _SHARES_CACHE[code] = int(str(it.get("LIST_SHRS", "0")).replace(",", "") or 0)
-                except ValueError: pass
-            got_sh = True
-        if not got_nav:  # 순자산총액: KRX가 최신일엔 0으로 주는 경우 있음 → 값 있는 가장 최근 날 사용
-            navs = {}
-            for it in items:
-                code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
-                try: navs[code] = int(str(it.get("INVSTASST_NETASST_TOTAMT", "0")).replace(",", "") or 0)
-                except ValueError: pass
-            if any(navs.values()):
-                _NAV_CACHE.update(navs); got_nav = True
-        if got_sh and got_nav:
-            break
-    return _SHARES_CACHE
+def _asof_date(asof):
+    """asof(None / date / 'YYYYMMDD') → date. None이면 오늘."""
+    if asof is None: return datetime.now().date()
+    if isinstance(asof, str): return datetime.strptime(asof, "%Y%m%d").date()
+    return asof
 
-def num_cu(e):
-    """ETF의 전체 CU수 = 상장좌수/CU. 좌수 미상이면 0."""
-    sh = listed_shares().get(e.get("krx", ""), 0)
+def listed_shares(asof=None):
+    """{KRX단축코드: 좌수} — PDF 기준일 asof의 바스켓을 환산할 때 쓸 좌수.
+    PDF(T) 바스켓은 T-1 종가 시점 보유이므로 좌수도 T-1 것을 쓴다.
+
+    ★ LIST_SHRS(상장좌수)를 쓰지 않는다 ★
+      같은 행 안에 있지만 그 필드는 설정·환매 결제 지연 때문에 실좌수와 어긋난다.
+      실측(2026-09-08~15, 4개 ETF): 차이 -2 ~ +7 CU, 최대 1.1%, 부호도 뒤집힘.
+      실좌수 = 순자산총액 ÷ NAV 로 역산해야 하며, 이때만
+      '1CU 바스켓 평가액 × 좌수 = 순자산' 항등식이 성립한다.
+      순자산이 실린 영업일만 채택하고(KRX가 최신일엔 0으로 주는 날이 있다),
+      NAV·순자산이 모두 없을 때만 LIST_SHRS로 폴백한다.
+    """
+    start = prev_trading_day(_asof_date(asof))
+    ck = start.strftime("%Y%m%d")
+    if ck in _SHARES_CACHE: return _SHARES_CACHE[ck]
+    _SHARES_CACHE[ck] = {}; _NAV_CACHE[ck] = {}
+    key = _krx_key()
+    if not key: return _SHARES_CACHE[ck]
+    def _n(it, k):
+        try: return float(str(it.get(k, "0")).replace(",", "") or 0)
+        except (ValueError, TypeError): return 0.0
+    d = start
+    for _ in range(8):
+        ymd = d.strftime("%Y%m%d")
+        items = _krx_get("http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd",
+                         {"AUTH_KEY": key, "basDd": ymd}).get("OutBlock_1", [])
+        if items and any(_n(it, "INVSTASST_NETASST_TOTAMT") for it in items):
+            sh = {}; nv = {}
+            for it in items:
+                code = str(it.get("ISU_SRT_CD") or it.get("ISU_CD") or "")
+                if not code: continue
+                nav = _n(it, "NAV"); na = _n(it, "INVSTASST_NETASST_TOTAMT")
+                if na: nv[code] = int(na)
+                sh[code] = int(round(na / nav)) if (nav and na) else int(_n(it, "LIST_SHRS"))
+            _SHARES_CACHE[ck] = sh; _NAV_CACHE[ck] = nv; _SHARES_ASOF[ck] = ymd
+            break
+        d = prev_trading_day(d)
+    return _SHARES_CACHE[ck]
+
+def num_cu(e, asof=None):
+    """ETF의 전체 CU수 = 좌수/CU. 좌수 미상이면 0."""
+    sh = listed_shares(asof).get(e.get("krx", ""), 0)
     cu = e.get("cu", 0)
     return (sh / cu) if (sh and cu) else 0
 
-def etf_navtotal(e):
+def etf_navtotal(e, asof=None):
     """ETF 순자산총액(원, KRX 공식) = 비중 분모. 미상이면 0."""
-    listed_shares()  # 캐시 채움(좌수와 동일 API)
-    return _NAV_CACHE.get(e.get("krx", ""), 0)
+    listed_shares(asof)  # 캐시 채움(좌수와 동일 API)
+    ck = prev_trading_day(_asof_date(asof)).strftime("%Y%m%d")
+    return _NAV_CACHE.get(ck, {}).get(e.get("krx", ""), 0)
 
 def etf_cash_percu(e, ymd):
     """1CU 현금(원) — PDF 현금라인 평가금액. 페처가 채운 캐시에서. 미상이면 None."""
@@ -320,6 +338,61 @@ def _cashlabel(g):
     if c is None: return ""
     r = g.get("cashr")
     return f"현금 {c/1e8:,.0f}억" + (f"({r}%)" if r is not None else "")
+
+VOL_BLOCK = 1.00   # 구간 누적 거래량의 100% 초과 → 금액 발행 중단(장내 체결 불가)
+VOL_WARN  = 0.50   # 50% 초과 → 경고만(금액은 유지)
+
+def krx_kosdaq_volumes(ymd):
+    """{종목명: 그날 거래량(주)} — 코스닥. 미공시·실패 시 빈 dict.
+    코스피 종목은 KRX 구독 밖이라 조회되지 않는다(= 가드 사각지대, 그 경우 검사 생략)."""
+    if ymd in _KRX_VOL_CACHE: return _KRX_VOL_CACHE[ymd]
+    _KRX_VOL_CACHE[ymd] = {}
+    key = _krx_key()
+    if not key: return _KRX_VOL_CACHE[ymd]
+    items = _krx_get("http://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd",
+                     {"AUTH_KEY": key, "basDd": ymd}).get("OutBlock_1", [])
+    m = {}
+    for it in items:
+        try: m[it["ISU_NM"].strip()] = float(str(it["ACC_TRDVOL"]).replace(",", ""))
+        except (ValueError, KeyError, TypeError): pass
+    _KRX_VOL_CACHE[ymd] = m
+    return m
+
+def flow_window(pk, t_ymd, cap=15):
+    """변화가 실제로 일어난 거래일 구간 = [pk, t의 직전 영업일].
+    PDF(T)는 T-1 종가 시점 보유이므로 PDF(pk)→PDF(T) 변화는 pk일부터 T-1일까지의 매매다.
+    스냅샷이 며칠 비면 구간이 자동으로 넓어져 '하루 거래량 대비' 오탐을 막는다."""
+    a = datetime.strptime(pk, "%Y%m%d").date()
+    b = prev_trading_day(datetime.strptime(t_ymd, "%Y%m%d").date())
+    out = []; d = a
+    while d <= b and len(out) < cap:
+        if is_trading_day(d): out.append(d.strftime("%Y%m%d"))
+        d += timedelta(days=1)
+    return out
+
+def volume_ratio(nm, shares, days):
+    """(필요 주식수 / 구간 누적 거래량, 누적 거래량). 거래량을 못 구하면 (None, 0)."""
+    tot = 0.0
+    for ymd in days:
+        tot += krx_kosdaq_volumes(ymd).get(nm, 0.0)
+    if tot <= 0: return None, 0.0
+    return shares / tot, tot
+
+def last_held(kk, before_ymd, nm, max_back=30, max_gap=30):
+    """before_ymd 이전 스냅샷에서 nm을 마지막으로 보유한 (기준일, 수량). 없으면 None.
+    '신규편입'이 사실은 며칠 공백 뒤의 재등장인지 가린다.
+    max_gap(일)보다 오래된 보유는 무시한다 — 그 정도면 진짜 신규로 본다."""
+    try: lim = datetime.strptime(before_ymd, "%Y%m%d").date() - timedelta(days=max_gap)
+    except ValueError: return None
+    for ymd in sorted((d for d in kk if d < before_ymd), reverse=True)[:max_back]:
+        try:
+            if datetime.strptime(ymd, "%Y%m%d").date() < lim: break
+        except ValueError: continue
+        v = (kk.get(ymd) or {}).get(nm)
+        if v is None: continue
+        q = _qp(v)[0]
+        if q > 0: return ymd, q
+    return None
 
 def krx_kosdaq_prices():
     """{종목명: 종가} — KRX 코스닥 최근 영업일 종가. 운용사 평가금액 미제공 종목의 종가 fallback."""
@@ -436,7 +509,7 @@ def run(today=None):
     save_snap(snap)
 
     # 출력 빌드 (스냅샷에서, 8개 전부 상태 포함)
-    groups = []; csv_rows = []; done = 0; pend = []
+    groups = []; csv_rows = []; done = 0; pend = []; blocked = 0
     for e in ETFS:
         kk = snap.get(f"{e['am']}:{e['id']}", {})
         pk = _prev_key(kk, t_ymd)            # 실제 전영업일(휴장 누락 자동 보정)
@@ -445,19 +518,34 @@ def run(today=None):
             rows = [r for r in diff(kk[t_ymd], kk[pk])
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
-            nc = num_cu(e)
+            nc = num_cu(e, t_ymd)
             stockval = _basket_total(kk[t_ymd]) * nc  # 보유주식총액(KRX 종가 fallback 포함 → PLUS 현금비율 정확)
-            aum = etf_navtotal(e) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
+            aum = etf_navtotal(e, t_ymd) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
+            win = flow_window(pk, t_ymd)   # 이 변화가 실제로 일어난 거래일 구간
             for r in rows:
+                # (1) '신규편입'이 사실은 공백 뒤 재등장인지 확인 → 재편입으로 정정
+                if r["구분"] == "신규편입":
+                    lh = last_held(kk, pk, r["종목명"])
+                    if lh: r["구분"] = "재편입"; r["직전보유"] = lh
+                # (2) 금액
                 r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
+                # (3) 물리적 타당성: 필요 주식수가 구간 시장 거래량을 넘으면 금액을 발행하지 않는다
+                need = abs(r["변화"]) * nc if nc else 0
+                ratio, wvol = volume_ratio(r["종목명"], need, win)
+                r["거래량비"] = ratio; r["구간거래량"] = wvol; r["구간일수"] = len(win)
+                if ratio is not None and ratio > VOL_BLOCK:
+                    r["검증"] = "불가"; r["보류금액"] = r["전체금액"]; r["전체금액"] = None
+                elif ratio is not None and ratio > VOL_WARN:
+                    r["검증"] = "의심"
                 r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
-            buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
+            buy = sorted([r for r in rows if r["구분"] in ("신규편입", "재편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
             cpc = etf_cash_percu(e, t_ymd); spc = stockval / nc if nc else 0   # 1CU 현금·주식
             cash = round(cpc * nc) if (cpc is not None and nc) else None
             cashr = round(cpc / (cpc + spc) * 100, 1) if (cpc is not None and (cpc + spc) > 0) else None
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell,
-                           "aum": aum, "cash": cash, "cashr": cashr})
+                           "aum": aum, "cash": cash, "cashr": cashr, "pk": pk, "win": len(win)})
+            blocked += sum(1 for r in rows if r.get("검증") == "불가")
             for r in rows:
                 csv_rows.append([e["name"], e["am"], t_ymd, pk, r["구분"], r["종목명"],
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
@@ -465,15 +553,23 @@ def run(today=None):
                                  (r["전체금액"] if r["전체금액"] is not None else ""),
                                  (r["비중"] if r.get("비중") is not None else ""),
                                  (round(r["보유비중전일"], 2) if r.get("보유비중전일") is not None else ""),
-                                 (round(r["보유비중당일"], 2) if r.get("보유비중당일") is not None else "")])
+                                 (round(r["보유비중당일"], 2) if r.get("보유비중당일") is not None else ""),
+                                 r.get("검증", ""),
+                                 (round(r["거래량비"] * 100, 1) if r.get("거래량비") is not None else ""),
+                                 (int(r["구간거래량"]) if r.get("구간거래량") else ""),
+                                 r.get("구간일수", ""),
+                                 (r["직전보유"][0] if r.get("직전보유") else ""),
+                                 (int(r["직전보유"][1]) if r.get("직전보유") else ""),
+                                 (r.get("보류금액") if r.get("보류금액") is not None else "")])
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
             pend.append(e["name"].split()[0])
     status_line = f"캡처 {done}/{len(ETFS)}" + (f"  ·  대기: {', '.join(pend)}" if pend else "  ·  전부 반영 완료")
+    if blocked: status_line += f"  ·  검증필요 {blocked}건"
     csv_path = os.path.join(BASE, f"pdf_change_{t_ymd}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)","전체대비비중(%)","보유비중전일(%)","보유비중당일(%)"])
+        w.writerow(["ETF","운용사","당일기준일","전일기준일","구분","종목명","당일수량","전일수량","수량변화(1CU)","1CU변화금액(원)","전체매매금액(원)","전체대비비중(%)","보유비중전일(%)","보유비중당일(%)","검증","거래량비(%)","구간거래량(주)","구간일수","직전보유일","직전보유수량","보류금액(원)"])
         for r in csv_rows: w.writerow(r)
     xlsx_path = write_excel(groups, today, prev, status_line)
     print(f"\n[{status_line}]  변화 {len(csv_rows)}행 → {os.path.basename(xlsx_path)}")
@@ -529,13 +625,21 @@ def _build_period_groups(first, last):
             rows = [r for r in diff(lm, fm)
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
-            nc = num_cu(e)
+            nc = num_cu(e, l_ymd)
             stockval = _basket_total(lm) * nc  # 보유주식총액(마지막일, KRX 종가 fallback 포함)
-            aum = etf_navtotal(e) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
+            aum = etf_navtotal(e, l_ymd) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
+            win = flow_window(f_ymd, l_ymd)
             for r in rows:
                 r["전체금액"] = round(r["변화금액"] * nc) if (r["변화금액"] is not None and nc) else None
+                need = abs(r["변화"]) * nc if nc else 0
+                ratio, wvol = volume_ratio(r["종목명"], need, win)
+                r["거래량비"] = ratio; r["구간거래량"] = wvol; r["구간일수"] = len(win)
+                if ratio is not None and ratio > VOL_BLOCK:
+                    r["검증"] = "불가"; r["보류금액"] = r["전체금액"]; r["전체금액"] = None
+                elif ratio is not None and ratio > VOL_WARN:
+                    r["검증"] = "의심"
                 r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
-            buy = sorted([r for r in rows if r["구분"] in ("신규편입", "수량확대")], key=lambda r: -r["변화"])
+            buy = sorted([r for r in rows if r["구분"] in ("신규편입", "재편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
             cpc = etf_cash_percu(e, l_ymd); spc = stockval / nc if nc else 0
             cash = round(cpc * nc) if (cpc is not None and nc) else None
@@ -579,6 +683,35 @@ def rolling_report(asof=None, ndays=5):
     print(f"[롤링 저장] {os.path.basename(path)}")
     return path
 
+
+def _rowtag(r, short=False):
+    """종목명 뒤 표시. '재편입'은 공백 전 보유를 같이 알려 '신규'로 오독되는 것을 막는다."""
+    t = r.get("구분")
+    if t == "재편입":
+        lh = r.get("직전보유")
+        s0 = "  (재편입)" if (short or not lh) else f"  (재편입·{lh[0][4:6]}/{lh[0][6:]}까지 {int(lh[1]):,}주)"
+    elif t == "신규편입": s0 = "  (신규)"
+    elif t == "편출":     s0 = "  (편출)"
+    else:                 s0 = ""
+    v = r.get("검증")
+    # 모바일(short)에서는 금액 칸이 이미 '검증필요'를 표시하므로 이름 쪽 중복을 뺀다(글자 축소 방지).
+    if v == "불가" and not short: s0 += " ※검증필요"   # ⚠(U+26A0)은 맑은고딕에 없어 네모로 깨진다
+    elif v == "의심":             s0 += " ※"
+    return s0
+
+def _namecell(r, short=False):
+    """종목명 셀. 표시(재편입·편출·검증)는 둘째 줄로 내려 글자 자동축소를 막는다."""
+    t = _rowtag(r, short).strip()
+    return r["종목명"] + (chr(10) + t if t else "")
+
+def _amtcell(r, short=False):
+    """금액 셀. 타당성 가드에 걸린 행은 금액 대신 사유를 쓴다(단정형 오보 방지)."""
+    if r.get("검증") == "불가":
+        rt = r.get("거래량비")
+        if short or rt is None: return "검증필요"
+        return "검증필요" + chr(10) + f"(거래량 {rt*100:,.0f}%)"
+    a = r.get("전체금액")
+    return "-" if a is None else f"{a/1e8:+,.1f}억"
 
 def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일", lbl_prev="전영업일", fname=None):
     """8개 ETF 전부 표시(변화있음=좌매수/우매도, 변화없음, 대기). 날짜 YYYY-MM-DD.
@@ -648,10 +781,10 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
             amt = r0.get("전체금액")
             wp = r0.get("보유비중전일"); wt = r0.get("보유비중당일")
             hold = "-" if (wp is None and wt is None) else f"{(wp or 0):.2f}%→{(wt or 0):.2f}%"
-            tag = "  (신규)" if r0["구분"] == "신규편입" else ("  (편출)" if r0["구분"] == "편출" else "")
+            tag = _rowtag(r0)
             ws.cell(row, base, nm + tag).font = fnt
             cc = ws.cell(row, base + 1, int(r0["변화"])); cc.number_format = NUMFMT_UP; cc.font = fnt; cc.fill = bg; cc.alignment = Alignment(horizontal="right")
-            ca = ws.cell(row, base + 2, amt if amt is not None else "-"); ca.font = fnt; ca.fill = bg; ca.alignment = Alignment(horizontal="right")
+            ca = ws.cell(row, base + 2, amt if amt is not None else ("검증필요" if r0.get("검증") == "불가" else "-")); ca.font = fnt; ca.fill = bg; ca.alignment = Alignment(horizontal="right")
             if amt is not None: ca.number_format = AMTFMT
             cp = ws.cell(row, base + 3, hold); cp.font = fnt; cp.fill = bg; cp.alignment = Alignment(horizontal="right")
             ws.cell(row, base + 4, f"{pq:,}→{tq:,}").alignment = Alignment(horizontal="right")
@@ -733,13 +866,13 @@ def render_report_image(groups, today, prev, status_line="", title=None,
         for i in range(n):
             row = [""] * 9; col = ["white"] * 9
             if i < len(buy):
-                b = buy[i]; tag = " (신규)" if b["구분"] == "신규편입" else ""
-                row[0] = b["종목명"] + tag; row[1] = _chcell(b); row[2] = _eok(b.get("전체금액"))
+                b = buy[i]
+                row[0] = _namecell(b); row[1] = _chcell(b); row[2] = _amtcell(b)
                 row[3] = _holdcell(b)
                 for c in (0, 1, 2, 3): col[c] = RBG
             if i < len(sell):
-                s = sell[i]; tag = " (편출)" if s["구분"] == "편출" else ""
-                row[5] = s["종목명"] + tag; row[6] = _chcell(s); row[7] = _eok(s.get("전체금액"))
+                s = sell[i]
+                row[5] = _namecell(s); row[6] = _chcell(s); row[7] = _amtcell(s)
                 row[8] = _holdcell(s)
                 for c in (5, 6, 7, 8): col[c] = BBG
             cell.append(row); ccol.append(col)
@@ -798,12 +931,12 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         rows.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
         for b in (buy or [None]):
             rows.append(["(없음)", "", "", ""] if b is None else
-                        [b["종목명"] + (" (신규)" if b["구분"] == "신규편입" else ""), _chc(b), _eok(b), _hold(b)])
+                        [_namecell(b, short=True), _chc(b), _amtcell(b, short=True), _hold(b)])
             styles.append("data")
         rows.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
         for s in (sell or [None]):
             rows.append(["(없음)", "", "", ""] if s is None else
-                        [s["종목명"] + (" (편출)" if s["구분"] == "편출" else ""), _chc(s), _eok(s), _hold(s)])
+                        [_namecell(s, short=True), _chc(s), _amtcell(s, short=True), _hold(s)])
             styles.append("data")
     HU = {"hdr": 1.0, "etf": 1.25, "sect": 1.0, "data": 1.75, "gap": 1.4}   # 행 높이(상대)
     units = sum(HU[s] for s in styles)
