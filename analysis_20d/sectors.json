@@ -973,5 +973,10 @@
 "code": "036540",
 "sector": null,
 "market": "KOSDAQ"
+},
+"디케이티": {
+"code": "290550",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
