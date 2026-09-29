@@ -126,73 +126,179 @@ def fetch_plus(n, ymd):
         else: out[nm] = [q, None]   # PLUS는 평가금액 없음 → 종가 미상(KRX fallback)
     return out, actual
 
-# ── fetcher: KB(RISE) 구성종목 엑셀(HTML-xls, searchDate) → {종목:수량}, 기준일 ──
+# ── fetcher: KB(RISE) 1CU 구성종목 ──────────────────────────────
+# 2026-09 사이트 이전 대응.
+#   구: riseetf.co.kr/prod/finder/productViewTabExcel3 (HTML-xls) → 사망.
+#       지금은 Next.js SPA 껍데기(145KB)만 200으로 돌려준다(table 0개) → 2026-09-19부터 매일 빈값.
+#   신: RISE가 kbam.co.kr(KB자산운용 통합)로 이전. 구성종목은 JSON API.
+#       GET https://kbam.co.kr/api/products/etfs/{stid}/holdings?base_dt=YYYYMMDD
+#       → {base_dt, holding_count, total_count, available_dates[],
+#          items:[{rank,item_cd,item_nm,shares,unit_price,vamt,ratio}...]}
+#       쿠키·세션 불필요. stid는 기존 그대로('44I0').
+#   검증(2026-09-29): 구 페처 결과가 남아있는 20260916 스냅샷과 종목집합·수량 완전 일치(22종목).
+#
+# 주의 1) 미게시일·휴장일을 요청하면 404가 아니라 '최신 영업일'로 조용히 폴백한다.
+#         (실측: 20260925·20260101·20261231 요청 → 전부 base_dt 20260929 반환)
+#         → 요청한 ymd가 아니라 반드시 응답의 base_dt를 기준일로 반환할 것.
+#           그래야 run()의 `if tm and ta == t_ymd` 판정이 '대기'로 잡아준다.
+# 주의 2) JSON items는 상위 30종목 상한. total_count가 더 크면 같은 URL의 xlsx(전체)로 교체한다.
+#         보강 실패 시 잘린 바스켓을 쓰면 나머지가 전부 '편출'로 오탐되므로 빈값을 반환해 '대기'로 넘긴다.
 def fetch_rise(stid, ymd):
-    import pandas as pd, io
-    d = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
-    r = requests.get("https://www.riseetf.co.kr/prod/finder/productViewTabExcel3",
-                     params={"searchTargetId": stid, "searchDate": d},
-                     headers={"User-Agent": UA, "Accept-Language": "ko-KR",
-                              "Referer": f"https://www.riseetf.co.kr/prod/finderDetail/{stid}?searchFlag=viewtab2"},
-                     timeout=20)
-    out = {}
+    hdr = {"User-Agent": UA, "Accept-Language": "ko-KR",
+           "Referer": f"https://kbam.co.kr/products/{stid}"}
+    url = f"https://kbam.co.kr/api/products/etfs/{stid}/holdings"
+    r = requests.get(url, params={"base_dt": ymd},
+                     headers=dict(hdr, Accept="application/json"), timeout=20)
     try:
-        t = pd.read_html(io.StringIO(r.text))[0]
+        j = r.json()
     except Exception:
         return {}, ""
-    hdr = None; i_ev = None
-    for i in range(len(t)):
-        vals = [str(x).strip() for x in t.iloc[i].tolist()]
-        if "종목명" in vals and any("수량" in v for v in vals):
-            i_nm = vals.index("종목명"); i_q = next(j for j, v in enumerate(vals) if "수량" in v)
-            i_ev = next((j for j, v in enumerate(vals) if "평가" in v), None); hdr = i; break
-    if hdr is None:
+    actual = str(j.get("base_dt") or "").strip()   # 실제 기준일(폴백 감지용)
+    items = j.get("items") or []
+    if not actual or not items:
         return {}, ""
-    for i in range(hdr + 1, len(t)):
-        vals = [str(x).strip() for x in t.iloc[i].tolist()]
-        if len(vals) <= max(i_nm, i_q): continue
-        nm = vals[i_nm]
+    rows = [(str(it.get("item_nm") or "").strip(), it.get("shares"), it.get("vamt"))
+            for it in items]
+    try: total = int(j.get("total_count") or 0)
+    except (ValueError, TypeError): total = 0
+    if total > len(rows):          # 30종목 상한에 걸림 → 전체 엑셀로 교체
+        try:
+            import pandas as pd, io as _io
+            x = requests.get(url, params={"download": "xlsx", "base_dt": actual},
+                             headers=hdr, timeout=30)
+            df = pd.read_excel(_io.BytesIO(x.content))   # [종목코드,종목명,수량(주),보유비중(%),평가금액(원)]
+            c_nm = next(c for c in df.columns if "종목명" in str(c))
+            c_q = next(c for c in df.columns if "수량" in str(c))
+            c_ev = next((c for c in df.columns if "평가금액" in str(c)), None)
+            rows = [(str(v[c_nm]).strip(), v[c_q], (v[c_ev] if c_ev is not None else None))
+                    for _, v in df.iterrows()]
+            if len(rows) < total:
+                return {}, ""
+        except Exception:
+            return {}, ""
+    out = {}
+    for nm, q, ev in rows:
         if not nm or nm == "nan": continue
-        try: ev = float(vals[i_ev].replace(",", "")) if (i_ev is not None and i_ev < len(vals)) else 0.0
-        except ValueError: ev = 0.0
+        try: ev = float(str(ev).replace(",", "")) if ev is not None else 0.0
+        except (ValueError, TypeError): ev = 0.0
         if any(s in nm for s in SKIP):
-            _note_cash(stid, ymd, nm, ev); continue
-        try: q = float(vals[i_q].replace(",", ""))
-        except ValueError: continue
+            _note_cash(stid, ymd, nm, ev); continue     # 원화예금 등 → 현금 캐시
+        try: q = float(str(q).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if not q: continue
         if nm in out: out[nm][0] += q
-        else: out[nm] = [q, (ev / q if (q and ev) else None)]
-    return out, (ymd if out else "")
+        else: out[nm] = [q, (ev / q if ev else None)]
+    return out, (actual if out else "")
 
-# ── fetcher: 미래에셋(TIGER) pdfListAjax.ajax (세션+fixDate 점형식) → {종목:수량}, 기준일 ──
-def fetch_tiger(isin, ymd):
-    import pandas as pd, io
-    d = f"{ymd[:4]}.{ymd[4:6]}.{ymd[6:]}"  # 점 형식 필수
+# ── fetcher: 미래에셋(TIGER) — GET 단발 + clamp 탐지 + 진단로그 + WiseReport 폴백 ──
+#   2026-09-29 진단: 이 페처만 클라우드(GitHub Actions·미국 러너)에서 2026-08-18 배포 이후
+#   단 한 번도 성공한 적이 없다(레포 snapshots.json 의 미래에셋 항목 0일). 로컬(한국)은 33종목 정상.
+#   러너에서 두 요청이 1.4초에 끝난다(같은 러너의 RISE 145KB는 4.5초, 한국은 같은 요청 2.08초)
+#   → 본문을 못 받고 CloudFront 엣지에서 잘린 것. 국가 차단은 아니고(해외 egress는 정상 응답)
+#   러너 IP대역(Azure/GitHub ASN) 대상 WAF 거부가 유력. 기존 코드는 read_html 실패를 통째로
+#   삼켜 '빈값'만 남겨 원인 추적이 불가능했다 → 실패 시 HTTP코드·본문 앞부분을 로그로 남긴다.
+#
+#   ★ clamp 주의: 이 endpoint는 아직 안 나온 날짜(미래 포함)를 요청하면 404가 아니라
+#     '최신 바스켓'을 주면서 요청 날짜를 그대로 echo한다. 그대로 믿으면 묵은 바스켓이
+#     오늘치로 저장된다(켐트로닉스 오보와 같은 유형). → 전영업일 응답과 본문이 완전히 같으면
+#     clamp로 보고 빈값을 반환해 '대기'로 넘긴다. 종가가 매일 다르므로 본문 동일 = 같은 파일이다.
+_TIGER_KRX = {"KR70168K0008": "0168K0"}   # ISIN → KRX 단축코드(WiseReport 폴백용)
+
+def _tiger_rows(text):
+    """pdfListAjax 응답(<tr> 조각) → [[셀,...], ...]. 표가 아니면 [] (pandas·lxml 불필요)."""
+    import re
+    rows = []
+    for tr in re.findall(r"<tr[^>]*>.*?</tr>", text, re.S | re.I):
+        cells = [" ".join(re.sub(r"<[^>]+>", " ", c).split())
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S | re.I)]
+        if len(cells) >= 4:
+            rows.append(cells)
+    return rows
+
+def _tiger_raw(isin, ymd, tries=3):
+    """운용사 직접 호출 → 응답 text. POST·세션워밍업 불필요(GET 한 번으로 동일 본문, 실측 확인)."""
+    import time
     base = "https://investments.miraeasset.com/tigeretf/ko/product/search/detail"
-    s = requests.Session(); s.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR"})
-    s.get(f"{base}/index.do", params={"ksdFund": isin}, timeout=20)  # 세션 쿠키
-    body = {"ksdFund": isin, "pageIndex": 1, "firstIndex": 0, "listCnt": 300,
-            "fixDate": d, "prfPrd": "Week01", "order": "SRD"}
-    r = s.post(f"{base}/pdfListAjax.ajax", data=body,
-               headers={"X-Requested-With": "XMLHttpRequest", "Referer": f"{base}/index.do?ksdFund={isin}"}, timeout=20)
-    out = {}
+    hdr = {"User-Agent": UA, "Accept": "text/html, */*; q=0.01",
+           "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+           "X-Requested-With": "XMLHttpRequest",
+           "Referer": f"{base}/index.do?ksdFund={isin}"}
+    params = {"ksdFund": isin, "pageIndex": 1, "firstIndex": 0, "listCnt": 300,
+              "fixDate": f"{ymd[:4]}.{ymd[4:6]}.{ymd[6:]}", "prfPrd": "Week01", "order": "SRD"}
+    last = ""
+    for i in range(tries):
+        try:
+            r = requests.get(f"{base}/pdfListAjax.ajax", params=params, headers=hdr, timeout=25)
+            if r.status_code == 200 and _tiger_rows(r.text):
+                return r.text
+            last = f"HTTP {r.status_code} len={len(r.text)} head={r.text[:140]!r}"
+        except Exception as ex:
+            last = f"{type(ex).__name__}: {str(ex)[:140]}"
+        if i < tries - 1: time.sleep(2 * (i + 1))
+    print(f"  [TIGER] 미래에셋 응답에 표 없음 → {last}", flush=True)   # 조용히 넘기지 않는다
+    return ""
+
+def _tiger_wisereport(krx):
+    """폴백: WiseReport(네이버) CU 구성 → (행들, 실제기준일). 형제 프로젝트 import 없이 단독 동작."""
+    import re, json
+    if not krx: return [], ""
     try:
-        df = pd.read_html(io.StringIO("<table>" + r.text + "</table>"))[0]
-    except Exception:
-        return {}, ""
-    for _, row in df.iterrows():
-        nm = str(row[1]).strip()  # col0=종목코드,col1=종목명,col2=수량,col3=평가금액,col4=비중
+        r = requests.get("https://navercomp.wisereport.co.kr/v2/ETF/index.aspx",
+                         params={"cmp_cd": krx},
+                         headers={"User-Agent": UA, "Referer": "https://finance.naver.com/"},
+                         timeout=25)
+        r.encoding = "utf-8"
+        m = re.search(r"var\s+CU_data\s*=\s*(\{.*?\});", r.text, re.S)
+        if not m:
+            print(f"  [TIGER] WiseReport 폴백 실패 → HTTP {r.status_code} len={len(r.text)} CU_data 없음", flush=True)
+            return [], ""
+        g = (json.loads(m.group(1)) or {}).get("grid_data") or []
+        d = str(g[0].get("TRD_DT", ""))[:10].replace("-", "") if g else ""
+        return g, d
+    except Exception as ex:
+        print(f"  [TIGER] WiseReport 폴백 오류 → {type(ex).__name__}: {str(ex)[:120]}", flush=True)
+        return [], ""
+
+def fetch_tiger(isin, ymd):
+    txt = _tiger_raw(isin, ymd)
+    if txt:
+        # clamp 탐지: 전영업일 응답과 본문이 똑같으면 아직 당일분이 안 나온 것
+        try:
+            pv = prev_trading_day(datetime.strptime(ymd, "%Y%m%d").date()).strftime("%Y%m%d")
+            if _tiger_raw(isin, pv, tries=1) == txt:
+                print(f"  [TIGER] {ymd} 미게시(전영업일과 동일 본문) → 대기", flush=True)
+                txt = ""
+        except Exception:
+            pass
+    out = {}
+    for c in _tiger_rows(txt) if txt else []:
+        nm = c[1]                               # 0=종목코드 1=종목명 2=수량 3=평가금액 4=비중
         if not nm or nm == "nan": continue
-        try: ev = float(str(row[3]).replace(",", ""))
+        try: ev = float(c[3].replace(",", ""))
         except (ValueError, TypeError): ev = 0.0
         if any(sk in nm for sk in SKIP):
             _note_cash(isin, ymd, nm, ev); continue
-        try: q = float(str(row[2]).replace(",", ""))
+        try: q = float(c[2].replace(",", ""))
         except (ValueError, TypeError): continue
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, (ev / q if (q and ev) else None)]
-    return out, (ymd if out else "")
+    if out: return out, ymd
+    # 운용사 직접이 비면 폴백. 평가금액이 없어 단가는 None → 기존 종가 폴백(_px)이 채운다.
+    # ★ 요청일이 아니라 WiseReport가 보고한 실제 기준일을 반환한다(묵은 바스켓의 당일 위장 방지).
+    rows, src = _tiger_wisereport(_TIGER_KRX.get(isin, ""))
+    for it in rows:
+        nm = str(it.get("STK_NM_KOR", "")).strip()
+        if not nm or nm == "nan" or any(sk in nm for sk in SKIP): continue
+        try: q = float(str(it.get("AGMT_STK_CNT", 0) or 0).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if q <= 0: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, None]
+    if out:
+        print(f"  [TIGER] WiseReport 폴백 {len(out)}종목 (기준일 {src or '미상'})", flush=True)
+        return out, src
+    return {}, ""
 
-# ── fetcher: 현대(UNICORN) /api/etfPdf (fundCode,etfCode,ymd) → {종목:수량}, 기준일 ──
 def fetch_unicorn(combo, ymd):
     fund, etf = combo.split(":")
     r = requests.get("https://www.hyundaiam.com/api/etfPdf",
