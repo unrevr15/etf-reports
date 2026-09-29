@@ -579,7 +579,7 @@ def _fetch(e, ymd, tries=3):
     raise last
 
 
-def run(today=None):
+def run(today=None, weekly=True):
     """증분 구조: 이미 당일분 캡처된 ETF는 재요청 스킵, 미게시/지연만 매번 시도해 채움.
     매 실행 시 당일 파일(xlsx/csv)을 '현재까지 캡처된 전체 상태'로 덮어씀."""
     today = today or datetime.now().date()
@@ -680,8 +680,9 @@ def run(today=None):
     xlsx_path = write_excel(groups, today, prev, status_line)
     print(f"\n[{status_line}]  변화 {len(csv_rows)}행 → {os.path.basename(xlsx_path)}")
 
-    # 그 주 마지막 거래일(보통 금요일, 휴장이면 목요일)이면 주간 리포트도 생성
-    if is_last_trading_day_of_week(today):
+    # 그 주 마지막 거래일(보통 금요일, 휴장이면 목요일)이면 주간 리포트도 생성.
+    # weekly=False 는 호출자가 나중에 한 번만 만들겠다는 뜻(대기 루프가 폴링마다 재생성하는 것 방지).
+    if weekly and is_last_trading_day_of_week(today):
         try:
             weekly_report(today)
         except Exception as ex:
