@@ -22,6 +22,31 @@ RCLONE_REMOTE = os.getenv("RCLONE_REMOTE", "gdrive:etf_reports")
 
 def log(m): print(f"[{datetime.datetime.now():%H:%M:%S}] {m}", flush=True)
 
+DEGRADE_AFTER = 3   # 연속 이 거래일 수만큼 결측이면 '장기 파손'으로 보고 완결 판정에서 뺀다
+MAX_DEGRADED = 2    # 이보다 많이 깨졌으면 자동 제외하지 않는다(껍데기 리포트가 나가는 것 방지)
+
+def degraded_set(ctx):
+    """직전 DEGRADE_AFTER 거래일 내내 유효 캡처가 없는 ETF 이름 집합.
+    RISE처럼 한 곳이 오래 파손되면 매일 마감(8:40)까지 기다리게 되어 발송이 9시 반으로 밀린다.
+    스냅샷만 보고 판정하므로 상태파일이 필요 없고, 복구되면 자동으로 집합에서 빠진다.
+    오늘은 세지 않는다(아직 게시 전일 수 있으므로)."""
+    try:
+        snap = P.load_snap()
+        days = []
+        d = ctx["today"]
+        for _ in range(DEGRADE_AFTER):
+            d = P.prev_trading_day(d)
+            days.append(d.strftime("%Y%m%d"))
+        out = set()
+        for e in P.ETFS:
+            kk = snap.get(f"{e['am']}:{e['id']}", {})
+            if all(not kk.get(x) for x in days):
+                out.add(e["name"])
+        return out if len(out) <= MAX_DEGRADED else set()
+    except Exception as ex:
+        log(f"  [열화] 판정 실패(무시): {type(ex).__name__}")
+        return set()
+
 def main():
     today = datetime.date.today()
     if not P.is_trading_day(today):
@@ -48,12 +73,22 @@ def main():
     now_t = datetime.datetime.now().time()            # TZ=Asia/Seoul (워크플로 env)
     earliest = now_t >= datetime.time(7, 10)          # 7:10 이전엔 발송 안 함
     deadline = now_t >= datetime.time(8, 40)          # 8:40 넘으면 더 안 기다리고 되는대로 발송(운용사 늦게 게시 대비)
-    LATE = ("TIGER", "기술이전")                        # 오후 게시 → 완결 판정서 제외
-    pend_now = [g["etf"] for g in ctx["groups"] if g["state"] == "pending" and not any(k in g["etf"] for k in LATE)]
+    hard_stop = now_t >= datetime.time(11, 0)         # 11시 넘은 회차는 '아침 리포트'가 아니다 → 발송 금지
+    # 오후 게시가 정상인 ETF. 부분문자열이 아니라 이름 전체로 맞춘다
+    # (부분매칭이면 이름에 TIGER가 든 ETF가 나중에 추가될 때 조용히 빠진다).
+    LATE = ("TIGER 기술이전바이오액티브",)
+    deg = degraded_set(ctx)                           # 장기 파손 ETF → 완결 판정에서 자동 제외
+    pend_raw = [g["etf"] for g in ctx["groups"] if g["state"] == "pending" and g["etf"] not in LATE]
+    pend_now = [n for n in pend_raw if n not in deg]
+    deg_hit = [n for n in pend_raw if n in deg]       # 실제로 제외된 것만 로그에 남긴다
     krx_ok = ctx.get("krx_ok", True)                    # KRX 실패면 금액·순자산·현금 통째 빈칸 → 발송 보류
     complete = (len(pend_now) == 0) and krx_ok
-    send = send_win and earliest and (complete or deadline)   # 7:10↑ & (완결 or 8:40마감)
-    if send_win and earliest and not send:
+    send = send_win and earliest and (not hard_stop) and (complete or deadline)
+    if deg_hit:
+        log(f"  [열화] 연속 {DEGRADE_AFTER}거래일 결측 → 완결 판정 제외: {', '.join(sorted(deg_hit))}")
+    if send_win and earliest and hard_stop:
+        log("  발송 금지 — 11시 넘음(아침 리포트 아님). 파일만 갱신.")
+    elif send_win and earliest and not send:
         why = list(dict.fromkeys([p.split()[0] for p in pend_now] + ([] if krx_ok else ["KRX(금액)"])))
         log(f"  발송 보류 — 대기: {', '.join(why)} (마감 전 → 다음 회차 재시도)")
     cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
