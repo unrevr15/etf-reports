@@ -24,7 +24,7 @@ def log(m): print(f"[{datetime.datetime.now():%H:%M:%S}] {m}", flush=True)
 
 SEND_OPEN  = datetime.time(7, 10)   # 이 전에는 절대 안 보낸다
 SEND_CLOSE = datetime.time(8, 40)   # 여기까지만 '완결'을 기다린다. 넘으면 되는대로 발송
-SEND_HARD  = datetime.time(11, 0)   # 이 뒤 회차는 아침 리포트가 아니다 → 발송 금지
+SEND_HARD  = datetime.time(15, 0)   # 이 뒤 회차는 발송 금지. 11시였으나 GitHub 지연으로 첫 잡이 11시 넘어 뜨는 날(08-28 14:04)은 리포트가 통째로 빠져 15시로 완화. 중복은 날짜 마커가 막는다.
 WAIT_FLOOR = datetime.time(6, 30)   # 이보다 이른 회차는 잡 안에서 기다리지 않는다
 POLL_SEC   = 240                    # 잡 내부 재수집 간격(초)
 WAIT_MAX_MIN = 150                  # 잡 하나가 기다릴 수 있는 절대 상한(분). 러너 점유 안전장치.
