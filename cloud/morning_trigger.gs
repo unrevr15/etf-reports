@@ -23,7 +23,7 @@ function tick() {
   const props = PropertiesService.getScriptProperties();
   if (props.getProperty('LAST_FIRED') === ymd) return;      // 하루 1회
   const token = props.getProperty('GITHUB_TOKEN');
-  if (!token) throw new Error('스크립트 속성 GITHUB_TOKEN 이 없습니다');
+  if (!token || token === 'PASTE_TOKEN_HERE') { console.warn('GITHUB_TOKEN 미설정 — 건너뜀'); return; }
   const res = UrlFetchApp.fetch(
     'https://api.github.com/repos/' + REPO + '/actions/workflows/' + WORKFLOW + '/dispatches', {
       method: 'post',
@@ -37,8 +37,8 @@ function tick() {
   else throw new Error('dispatch 실패 HTTP ' + code + ' ' + res.getContentText().slice(0, 200));
 }
 
-// 수동 점검용: 지금 즉시 한 번 깨운다(창·요일·1회 제한 무시). 방 발송은 07:10 이후에만 일어나므로
-// 07:10 이전에 누르면 잡이 발송창까지 잡 안에서 기다린다.
+// 수동 점검용: 토큰·연결만 확인한다. morning 을 주지 않으므로 잡은 렌더만 하고 방으로 보내지 않는다.
+// 로그에 HTTP 204 가 찍히면 토큰과 권한이 맞는 것이다.
 function fireNow() {
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty('GITHUB_TOKEN');
@@ -46,7 +46,7 @@ function fireNow() {
     'https://api.github.com/repos/' + REPO + '/actions/workflows/' + WORKFLOW + '/dispatches', {
       method: 'post', contentType: 'application/json',
       headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' },
-      payload: JSON.stringify({ ref: 'main', inputs: { morning: 'true' } }),
+      payload: JSON.stringify({ ref: 'main' }),           // 입력 없음 = 발송 없음(렌더만)
       muteHttpExceptions: true,
     });
   console.log('HTTP ' + res.getResponseCode() + ' ' + res.getContentText());
