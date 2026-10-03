@@ -978,5 +978,10 @@
 "code": "290550",
 "sector": null,
 "market": "KOSDAQ"
+},
+"GST": {
+"code": "083450",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
