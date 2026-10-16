@@ -25,6 +25,10 @@ def prev_trading_day(d):
     p = d - timedelta(days=1)
     while not is_trading_day(p): p -= timedelta(days=1)
     return p
+def next_trading_day(d):
+    n = d + timedelta(days=1)
+    while not is_trading_day(n): n += timedelta(days=1)
+    return n
 
 SKIP = ("현금","원화예금","원화 예금","예수금","설정현금","CASH","원화","달러","USD","선물","원화현금")
 MIN_CHANGE = 3  # 이 미만(±1·±2주)의 수량확대/축소는 노이즈로 숨김. 신규편입·편출은 크기 무관 항상 표시.
@@ -202,7 +206,7 @@ def fetch_rise(stid, ymd):
 #     '최신 바스켓'을 주면서 요청 날짜를 그대로 echo한다. 그대로 믿으면 묵은 바스켓이
 #     오늘치로 저장된다(켐트로닉스 오보와 같은 유형). → 전영업일 응답과 본문이 완전히 같으면
 #     clamp로 보고 빈값을 반환해 '대기'로 넘긴다. 종가가 매일 다르므로 본문 동일 = 같은 파일이다.
-_TIGER_KRX = {"KR70168K0008": "0168K0"}   # ISIN → KRX 단축코드(WiseReport 폴백용)
+_TIGER_KRX = {"KR70168K0008": "0168K0", "KR70204S0006": "0204S0"}   # ISIN → KRX 단축코드(WiseReport 폴백용)
 
 def _tiger_rows(text):
     """pdfListAjax 응답(<tr> 조각) → [[셀,...], ...]. 표가 아니면 [] (pandas·lxml 불필요)."""
@@ -250,13 +254,13 @@ def _tiger_wisereport(krx):
         r.encoding = "utf-8"
         m = re.search(r"var\s+CU_data\s*=\s*(\{.*?\});", r.text, re.S)
         if not m:
-            print(f"  [TIGER] WiseReport 폴백 실패 → HTTP {r.status_code} len={len(r.text)} CU_data 없음", flush=True)
+            print(f"  [WiseReport {krx}] 실패 → HTTP {r.status_code} len={len(r.text)} CU_data 없음", flush=True)
             return [], ""
         g = (json.loads(m.group(1)) or {}).get("grid_data") or []
         d = str(g[0].get("TRD_DT", ""))[:10].replace("-", "") if g else ""
         return g, d
     except Exception as ex:
-        print(f"  [TIGER] WiseReport 폴백 오류 → {type(ex).__name__}: {str(ex)[:120]}", flush=True)
+        print(f"  [WiseReport {krx}] 오류 → {type(ex).__name__}: {str(ex)[:120]}", flush=True)
         return [], ""
 
 def fetch_tiger(isin, ymd):
@@ -331,6 +335,98 @@ def fetch_db(code):
             except (ValueError, TypeError): pass
     return out, (d or "").replace("-", "")
 
+# ── fetcher: WiseReport(네이버) CU 구성 — 자체 사이트에 PDF가 없는 운용사(MIDAS)용 ──
+# 실측(2026-10-16 15시): TRD_DT는 PDF 게시일 기준이고 당일분이 아니라 '전일 PDF'다
+# (KoAct 10-15 PDF와 74/74 일치, 10-16과 불일치). → 이 소스를 쓰는 ETF는 "lag":True 로 등록해 전일분으로 표시.
+def fetch_wisereport(krx, ymd):
+    """WiseReport 최신 CU 구성 → ({종목: [수량, None]}, 실제기준일). ymd는 무시(최신분만 제공). 단가 없음 → KRX 종가 폴백."""
+    rows, src = _tiger_wisereport(krx)
+    out = {}
+    for it in rows:
+        nm = str(it.get("STK_NM_KOR", "")).strip()
+        if not nm or nm == "nan" or any(sk in nm for sk in SKIP): continue
+        try: q = float(str(it.get("AGMT_STK_CNT", 0) or 0).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if q <= 0: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, None]
+    return (out, src) if out else ({}, "")
+
+# ── fetcher: DS자산운용(dsetf.com) — Next.js 서버렌더 페이지에 최신·직전일 바스켓(수량·평가금액·현금)이 통째로 들어있다 ──
+# 날짜 표기 주의: 사이트의 latestHoldingsDate 는 '보유일(종가 시점)'이라 다른 운용사 PDF 기준일보다 하루 앞서 보인다.
+# 실측(2026-10-16): DS '10-14' 바스켓 = WiseReport 10-15 PDF와 50/50 일치, DS '10-15'는 10-15 종가로 평가
+# (KoAct 10-16 PDF와 같은 평가일) → PDF 기준일 = next_trading_day(표기일). 즉 당일분을 제공한다(전일분 아님).
+def _ds_payload(code):
+    import re
+    r = requests.get(f"https://dsetf.com/etf/{code}", headers={"User-Agent": UA, "Accept": "text/html"}, timeout=25)
+    if r.status_code != 200:
+        print(f"  [DS] HTTP {r.status_code} len={len(r.text)}", flush=True)
+        return ""
+    parts = []
+    for c in re.findall(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)', r.text, re.S):
+        try: parts.append(json.loads('"' + c + '"'))      # JS 문자열 리터럴 = JSON 이스케이프(한글 보존)
+        except ValueError: parts.append(c)
+    return "".join(parts)
+
+def _ds_array(pl, anchor):
+    """pl 안에서 anchor(예: '"latestHoldings":') 바로 뒤의 JSON 배열을 괄호 균형으로 잘라 파싱."""
+    i = pl.find(anchor)
+    if i < 0: return []
+    s = pl.find("[", i + len(anchor))
+    if s < 0: return []
+    depth = 0; instr = False; esc = False
+    for j in range(s, len(pl)):
+        ch = pl[j]
+        if instr:
+            if esc: esc = False
+            elif ch == "\\": esc = True
+            elif ch == '"': instr = False
+            continue
+        if ch == '"': instr = True
+        elif ch == "[": depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                try: return json.loads(pl[s:j + 1])
+                except ValueError: return []
+    return []
+
+def _ds_map(items, key, pdf_ymd):
+    out = {}
+    _CASH_CACHE.pop((key, pdf_ymd), None)   # 같은 날짜를 여러 번 파싱해도(대기 폴링·주간) 현금이 누적되지 않게
+    for it in items:
+        nm = str(it.get("name", "")).strip()
+        if not nm: continue
+        try: q = float(it.get("quantity", 0) or 0); mv = float(it.get("marketValue", 0) or 0)
+        except (ValueError, TypeError): continue
+        if any(sk in nm for sk in SKIP) or not it.get("ticker"):   # 원화현금 행(ticker 빈값) → 1CU 현금
+            _note_cash(key, pdf_ymd, nm, mv); continue
+        if q <= 0: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (mv / q if mv else None)]
+    return out
+
+def fetch_ds(code, ymd):
+    """DS 상품 페이지 → ({종목: [수량, 단가]}, PDF기준일). 요청일이 최신/직전일 바스켓과 맞으면 그것, 아니면 최신을 실제 날짜와 함께."""
+    import re
+    pl = _ds_payload(code)
+    if not pl: return {}, ""
+    m = re.search(r'"latestHoldingsDate":"(\d{4})-(\d{2})-(\d{2})"', pl)
+    if not m:
+        print(f"  [DS] latestHoldingsDate 없음 (len={len(pl)})", flush=True)
+        return {}, ""
+    cur = next_trading_day(date(int(m.group(1)), int(m.group(2)), int(m.group(3)))).strftime("%Y%m%d")
+    cands = [(cur, _ds_array(pl, '"latestHoldings":'))]
+    m1 = re.search(r'"1d":\{"date":"(\d{4})-(\d{2})-(\d{2})","items":', pl)
+    if m1:
+        d1 = next_trading_day(date(int(m1.group(1)), int(m1.group(2)), int(m1.group(3)))).strftime("%Y%m%d")
+        cands.append((d1, _ds_array(pl, '"1d":{"date":"%s-%s-%s","items":' % m1.groups())))
+    for d, items in cands:
+        if d == ymd and items:
+            return _ds_map(items, code, d), d
+    d, items = cands[0]
+    return (_ds_map(items, code, d), d) if items else ({}, "")
+
 # ── 등록된 액티브 ETF ──────────────────────────────────────────
 # krx: KRX 단축코드(상장좌수 조회용), cu: 설정단위(CU) 크기 → 전체CU수 = 좌수/cu
 ETFS = [
@@ -340,7 +436,12 @@ ETFS = [
     {"name":"TIME K바이오액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"13","krx":"463050","cu":50000},
     {"name":"PLUS 코스닥150액티브","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399","krx":"0166N0","cu":50000},
     {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000},
-    {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":10000},  # CU=10000 (좌수/CU 정수검증으로 확정; 기존 config 20000은 오류)
+    {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":10000,"lag":True},  # CU=10000 (좌수/CU 정수검증으로 확정; 기존 config 20000은 오류)
+    # 2026-10-16 추가: 코스닥액티브 나머지 3종. "lag":True = 소스가 전일 PDF까지만 줄 수 있는 ETF(클라우드의 TIGER=403→WiseReport, MIDAS=WiseReport)
+    #   → 당일분이 없으면 '전일분'으로 표시(run()의 전일분 모드). DS는 자체 사이트가 당일분을 주므로 정상 경로.
+    {"name":"DS 코스닥액티브","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000},             # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
+    {"name":"TIGER 코스닥액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70204S0006","krx":"0204S0","cu":10000,"lag":True},  # CU=10000 (좌수 정수검증)
+    {"name":"MIDAS 코스닥액티브","am":"마이다스","mode":"dateapi","fetch":fetch_wisereport,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
     #   fetch_unicorn·fetch_db 함수는 코드에 유지 → 재추가 가능.
 ]
@@ -437,6 +538,11 @@ def etf_navtotal(e, asof=None):
 def etf_cash_percu(e, ymd):
     """1CU 현금(원) — PDF 현금라인 평가금액. 페처가 채운 캐시에서. 미상이면 None."""
     return _CASH_CACHE.get((e.get("id"), ymd))
+
+def _lagtag(g, sep="  "):
+    """전일분 그룹 표시 '※전일분 PDF 10/16' — 당일분이면 빈 문자열."""
+    a = g.get("asof")
+    return f"{sep}※전일분 PDF {a[4:6]}/{a[6:]}" if a else ""
 
 def _cashlabel(g):
     """배너용 현금 문구: '현금 61억(1.2%)'. 미상이면 빈 문자열."""
@@ -616,18 +722,31 @@ def run(today=None, weekly=True):
 
     # 출력 빌드 (스냅샷에서, 8개 전부 상태 포함)
     groups = []; csv_rows = []; done = 0; pend = []; blocked = 0
+    lagged = []
+    _first = [x["name"].split()[0] for x in ETFS]
+    def _short(e):   # 상태줄용 약칭: 'TIGER 코스닥'처럼 첫 단어가 겹치면 둘째 단어('액티브' 뗀 앞 4자)를 붙여 구분
+        w = e["name"].split()
+        return w[0] if _first.count(w[0]) == 1 or len(w) < 2 else f"{w[0]} {w[1].replace('액티브', '')[:4]}"
     for e in ETFS:
         kk = snap.get(f"{e['am']}:{e['id']}", {})
-        pk = _prev_key(kk, t_ymd)            # 실제 전영업일(휴장 누락 자동 보정)
-        if t_ymd in kk and pk:
+        cur = t_ymd if t_ymd in kk else None
+        pk = _prev_key(kk, t_ymd) if cur else None   # 실제 전영업일(휴장 누락 자동 보정)
+        # 전일분 모드: 소스가 전일 PDF까지만 주는 ETF("lag")는 당일분이 없으면 '전일 PDF vs 그 전일'을 대신 보여준다
+        # (매일 하루 늦게, 빠짐없이). 당일분이 들어오면 자동으로 정상 경로. 2거래일 이상 묵은 건 대기로 둔다.
+        if cur is None and e.get("lag"):
+            lp = _prev_key(kk, t_ymd)
+            if lp and lp >= p_ymd and _prev_key(kk, lp):
+                cur, pk = lp, _prev_key(kk, lp)
+        if cur and pk:
             done += 1
-            rows = [r for r in diff(kk[t_ymd], kk[pk])
+            if cur != t_ymd: lagged.append(_short(e))
+            rows = [r for r in diff(kk[cur], kk[pk])
                     if r["구분"] != "유지"
                     and (r["구분"] in ("신규편입", "편출") or abs(r["변화"]) >= MIN_CHANGE)]
-            nc = num_cu(e, t_ymd)
-            stockval = _basket_total(kk[t_ymd]) * nc  # 보유주식총액(KRX 종가 fallback 포함 → PLUS 현금비율 정확)
-            aum = etf_navtotal(e, t_ymd) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
-            win = flow_window(pk, t_ymd)   # 이 변화가 실제로 일어난 거래일 구간
+            nc = num_cu(e, cur)
+            stockval = _basket_total(kk[cur]) * nc  # 보유주식총액(KRX 종가 fallback 포함 → PLUS 현금비율 정확)
+            aum = etf_navtotal(e, cur) or (round(stockval) if stockval else None)  # 비중 분모 = KRX 순자산총액(우선)
+            win = flow_window(pk, cur)   # 이 변화가 실제로 일어난 거래일 구간
             for r in rows:
                 # (1) '신규편입'이 사실은 공백 뒤 재등장인지 확인 → 재편입으로 정정
                 if r["구분"] == "신규편입":
@@ -646,14 +765,15 @@ def run(today=None, weekly=True):
                 r["비중"] = round(r["전체금액"] / aum * 100, 3) if (r.get("전체금액") is not None and aum) else None
             buy = sorted([r for r in rows if r["구분"] in ("신규편입", "재편입", "수량확대")], key=lambda r: -r["변화"])
             sell = sorted([r for r in rows if r["구분"] in ("수량축소", "편출")], key=lambda r: r["변화"])
-            cpc = etf_cash_percu(e, t_ymd); spc = stockval / nc if nc else 0   # 1CU 현금·주식
+            cpc = etf_cash_percu(e, cur); spc = stockval / nc if nc else 0   # 1CU 현금·주식
             cash = round(cpc * nc) if (cpc is not None and nc) else None
             cashr = round(cpc / (cpc + spc) * 100, 1) if (cpc is not None and (cpc + spc) > 0) else None
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell,
-                           "aum": aum, "cash": cash, "cashr": cashr, "pk": pk, "win": len(win)})
+                           "aum": aum, "cash": cash, "cashr": cashr, "pk": pk, "win": len(win),
+                           "asof": (cur if cur != t_ymd else None)})   # asof = 전일분일 때의 PDF 기준일
             blocked += sum(1 for r in rows if r.get("검증") == "불가")
             for r in rows:
-                csv_rows.append([e["name"], e["am"], t_ymd, pk, r["구분"], r["종목명"],
+                csv_rows.append([e["name"], e["am"], cur, pk, r["구분"], r["종목명"],
                                  int(r["당일수량"]), int(r["전일수량"]), int(r["변화"]),
                                  (r["변화금액"] if r["변화금액"] is not None else ""),
                                  (r["전체금액"] if r["전체금액"] is not None else ""),
@@ -669,8 +789,9 @@ def run(today=None, weekly=True):
                                  (r.get("보류금액") if r.get("보류금액") is not None else "")])
         else:
             groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
-            pend.append(e["name"].split()[0])
-    status_line = f"캡처 {done}/{len(ETFS)}" + (f"  ·  대기: {', '.join(pend)}" if pend else "  ·  전부 반영 완료")
+            pend.append(_short(e))
+    status_line = (f"캡처 {done}/{len(ETFS)}" + (f"  ·  전일분: {', '.join(lagged)}" if lagged else "")
+                   + (f"  ·  대기: {', '.join(pend)}" if pend else "  ·  전부 반영 완료"))
     if blocked: status_line += f"  ·  검증필요 {blocked}건"
     csv_path = os.path.join(BASE, f"pdf_change_{t_ymd}.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -718,15 +839,24 @@ def nth_trading_day_before(d, n):
         x = prev_trading_day(x)
     return x
 
+def _fetch_exact(e, ymd):
+    """요청일과 실제 기준일이 같을 때만 맵을 준다 — 최신분만 주는 소스(DS·WiseReport)가 다른 날짜로 위장하는 것 방지."""
+    try:
+        m, a = _fetch(e, ymd)
+        return m if (m and a == ymd) else {}
+    except Exception:
+        return {}
+
 def _build_period_groups(first, last):
-    """first↔last PDF 비교 그룹 빌드. return (groups, done, pend_names)."""
+    """first↔last PDF 비교 그룹 빌드. return (groups, done, pend_names).
+    일일 캡처 스냅샷을 먼저 쓰고, 없을 때만 소스에서 받되 날짜가 정확히 맞는 것만 인정한다."""
     f_ymd, l_ymd = first.strftime("%Y%m%d"), last.strftime("%Y%m%d")
     groups = []; done = 0; pend = []
+    snap = load_snap()
     for e in ETFS:
-        try:
-            fm, _ = _fetch(e, f_ymd); lm, _ = _fetch(e, l_ymd)
-        except Exception:
-            fm = lm = {}
+        kk = snap.get(f"{e['am']}:{e['id']}", {})
+        fm = kk.get(f_ymd) or _fetch_exact(e, f_ymd)
+        lm = kk.get(l_ymd) or _fetch_exact(e, l_ymd)
         if fm and lm:
             done += 1
             rows = [r for r in diff(lm, fm)
@@ -861,7 +991,12 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
         aum = g.get("aum")
         aum_txt = f"      순자산 ≈ {aum/1e8:,.0f}억" if aum else ""
         _cl = _cashlabel(g); cash_txt = f"   ·   {_cl}" if _cl else ""
-        bc = ws.cell(row, 1, f"■ {etf}  ({am}){aum_txt}{cash_txt}      {lbl_cur} {td}  vs  {lbl_prev} {pd_}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
+        if g.get("asof"):   # 전일분: 이 그룹만의 실제 기준일을 쓴다
+            a, p = g["asof"], (g.get("pk") or "")
+            dates_txt = f"      ※전일분  PDF {a[:4]}-{a[4:6]}-{a[6:]}  vs  {p[:4]}-{p[4:6]}-{p[6:]}"
+        else:
+            dates_txt = f"      {lbl_cur} {td}  vs  {lbl_prev} {pd_}"
+        bc = ws.cell(row, 1, f"■ {etf}  ({am}){aum_txt}{cash_txt}{dates_txt}      매수 {len(buy)}종목  /  매도 {len(sell)}종목")
         bc.font = BANNERF; bc.alignment = Alignment(vertical="center")
         for c in range(1, NC + 1): ws.cell(row, c).fill = BANNERBG
         ws.row_dimensions[row].height = 19; row += 1
@@ -959,7 +1094,7 @@ def render_report_image(groups, today, prev, status_line="", title=None,
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
         aum = g.get("aum")
         _cl = _cashlabel(g)
-        ttl = f"■ {g['etf']}  ({g['am']})" + (f"   순자산 약 {aum/1e8:,.0f}억" if aum else "") + \
+        ttl = f"■ {g['etf']}  ({g['am']})" + _lagtag(g, "   ") + (f"   순자산 약 {aum/1e8:,.0f}억" if aum else "") + \
               (f"   ·   {_cl}" if _cl else "") + f"      매수 {len(buy)}  /  매도 {len(sell)}"
         ax.set_title(ttl, loc="left", fontsize=11, fontweight="bold", color="#1F3864", pad=6)
         n = max(len(buy), len(sell))
@@ -1032,7 +1167,7 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         if gi > 0: rows.append(["", "", "", ""]); styles.append("gap")
         aum = g.get("aum")
         _cl = _cashlabel(g)
-        banners[len(rows)] = f"■ {g['etf']} ({g['am']})" + (f"  ·  {aum/1e8:,.0f}억" if aum else "") + \
+        banners[len(rows)] = f"■ {g['etf']} ({g['am']})" + _lagtag(g, "  ") + (f"  ·  {aum/1e8:,.0f}억" if aum else "") + \
                              (f"  ·  {_cl}" if _cl else "")
         rows.append(["", "", "", ""]); styles.append("etf")   # 배너는 표 위에 겹쳐 그림(잘림 방지)
         rows.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
