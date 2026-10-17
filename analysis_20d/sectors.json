@@ -983,5 +983,55 @@
 "code": "083450",
 "sector": null,
 "market": "KOSDAQ"
+},
+"덕산테코피아": {
+"code": "317330",
+"sector": null,
+"market": "KOSDAQ"
+},
+"HT로보틱스": {
+"code": "396300",
+"sector": null,
+"market": "KOSDAQ"
+},
+"네오셈": {
+"code": "253590",
+"sector": null,
+"market": "KOSDAQ"
+},
+"유니테스트": {
+"code": "086390",
+"sector": null,
+"market": "KOSDAQ"
+},
+"엔알비": {
+"code": "475230",
+"sector": null,
+"market": "KOSDAQ"
+},
+"동국산업": {
+"code": "005160",
+"sector": null,
+"market": "KOSDAQ"
+},
+"에이팩트": {
+"code": "200470",
+"sector": null,
+"market": "KOSDAQ"
+},
+"피엠티": {
+"code": "147760",
+"sector": null,
+"market": "KOSDAQ"
+},
+"지에프아이": {
+"code": "493330",
+"sector": null,
+"market": "KOSDAQ"
+},
+"제이에스링크": {
+"code": "127120",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
