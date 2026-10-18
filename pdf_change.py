@@ -437,9 +437,10 @@ ETFS = [
     {"name":"PLUS 코스닥150액티브","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399","krx":"0166N0","cu":50000},
     {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000},
     {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":10000,"lag":True},  # CU=10000 (좌수/CU 정수검증으로 확정; 기존 config 20000은 오류)
-    # 2026-10-16 추가: 코스닥액티브 나머지 3종. "lag":True = 소스가 전일 PDF까지만 줄 수 있는 ETF(클라우드의 TIGER=403→WiseReport, MIDAS=WiseReport)
-    #   → 당일분이 없으면 '전일분'으로 표시(run()의 전일분 모드). DS는 자체 사이트가 당일분을 주므로 정상 경로.
-    {"name":"DS 코스닥액티브","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000},             # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
+    # 2026-10-16 추가: 코스닥액티브 나머지 3종. "lag":True = 당일분이 늦거나 전일 PDF까지만 오는 ETF(클라우드의 TIGER=403→WiseReport, MIDAS=WiseReport)
+    #   → 당일분이 없으면 '전일분'으로 표시(run()의 전일분 모드)하고, 아침 발송 완결 판정에서 빠진다(run_daily.LATE).
+    #   DS는 자체 사이트가 당일분을 주지만(전일 장 마감 후 갱신) 게시 시각이 검증 전이라 안전망으로 lag.
+    {"name":"DS 코스닥액티브","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000,"lag":True},  # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
     {"name":"TIGER 코스닥액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70204S0006","krx":"0204S0","cu":10000,"lag":True},  # CU=10000 (좌수 정수검증)
     {"name":"MIDAS 코스닥액티브","am":"마이다스","mode":"dateapi","fetch":fetch_wisereport,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
