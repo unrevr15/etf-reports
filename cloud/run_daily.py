@@ -125,11 +125,43 @@ def wait_until_sendable(ctx, today):
         nc = P.run(today, weekly=False)               # 증분 재수집(주간은 나중에 한 번만)
         if nc: ctx = nc
 
+# ── 임시 진단(2026-10-21~): FunETF가 아침에 '당일' PDF를 주는지, GitHub 러너에서 열리는지 ──
+# 되면 TIGER 2종·MIDAS·RISE를 WiseReport(전일분) → FunETF(당일분)로 바꾼다. 판정이 끝나면 이 블록과 호출 2곳을 삭제.
+# 지문 = (종목명, 1CU수량) 정렬 목록의 md5 앞 8자 → 로컬에서 운용사 원본 PDF로 같은 방식으로 계산해 대조한다.
+FUNETF_PROBE = (("0204S0", "TIGER 코스닥"), ("0168K0", "TIGER 기술이전"), ("0191B0", "MIDAS"), ("0000Z0", "RISE"))
+
+def _isin(code):
+    """KRX 단축코드 → ISIN(KR7+코드+00+체크디지트, 문자→숫자 변환 후 Luhn)."""
+    s = "KR7" + code + "00"; digits = "".join(str(int(c, 36)) for c in s); tot = 0
+    for i, ch in enumerate(reversed(digits)):
+        n = int(ch) * (2 if i % 2 == 0 else 1); tot += n // 10 + n % 10
+    return s + str((10 - tot % 10) % 10)
+
+def probe_funetf(tag):
+    import re, json, time, hashlib, requests
+    for code, nm in FUNETF_PROBE:
+        t0 = time.time()
+        try:
+            r = requests.get(f"https://www.funetf.co.kr/product/etf/view/{_isin(code)}",
+                             headers={"User-Agent": P.UA}, timeout=8)
+            ymd = (re.findall(r"etfPdfYmd\s*=\s*['\"]?(\d{8})", r.text) or ["?"])[0]
+            m = re.search(r"setPdfChart\(\s*(\[.*?\])\s*\)", r.text, re.S)
+            rows = json.loads(m.group(1)) if m else []
+            q = sorted((str(x.get("citmNm", "")).strip(), float(x.get("icuStkc") or 0)) for x in rows)
+            q = [(n, v) for n, v in q if n and not any(s in n for s in P.SKIP)]
+            fp = hashlib.md5(json.dumps(q, ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
+            log(f"  [FunETF 진단·{tag}] {nm}: HTTP {r.status_code} {time.time()-t0:.1f}s 기준일 {ymd} 종목 {len(q)} 지문 {fp}")
+        except Exception as ex:
+            log(f"  [FunETF 진단·{tag}] {nm}: {type(ex).__name__} {str(ex)[:80]} ({time.time()-t0:.1f}s) — 나머지 생략")
+            return   # 같은 호스트라 나머지도 같은 결과 → 시간 낭비 방지
+
 def main():
     today = datetime.date.today()
     if not P.is_trading_day(today):
         log(f"{today} 휴장일 — 종료"); return
     ymd = today.strftime("%Y%m%d")
+    try: probe_funetf("시작")
+    except Exception: pass
 
     log("1) 일일 리포트")
     # weekly=False: 주간 리포트는 대기가 끝난 뒤(데이터가 가장 많이 찬 시점) 한 번만 만든다.
@@ -178,6 +210,8 @@ def main():
     # 채널2: 신규(무채색·모바일 세로)
     deliver("채널2", P.render_report_image_mobile(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"]),
             os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_CHAT_ID2"), f".tg_sent2_{ymd}")
+    try: probe_funetf("발송 시점")
+    except Exception: pass
     # 주간 리포트 — 대기까지 끝난 뒤 한 번만(그 주 마지막 거래일에만)
     if P.is_last_trading_day_of_week(today):
         try: P.weekly_report(today)
