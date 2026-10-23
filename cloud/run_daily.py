@@ -7,7 +7,8 @@
 4) 당일 산출물을 Google Drive(rclone)로 업로드
 모두 멱등(증분 스냅샷) — 하루에 여러 번 돌려도 안전(늦게 뜨는 TIGER를 채움).
 """
-import os, sys, glob, subprocess, datetime
+import os, sys, glob, subprocess, datetime, json, base64, faulthandler, urllib.request, urllib.error
+from contextlib import contextmanager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.dirname(HERE)  # pdf_change.py / portfolio_chart.py 위치
@@ -35,6 +36,59 @@ WAIT_MAX_MIN = 150                  # 잡 하나가 기다릴 수 있는 절대 
 # 이들은 당일분이 없으면 '전일분'으로 표시되므로 기다릴 이유가 없다. 이름 전체로 맞춘다
 # (부분매칭이면 이름에 TIGER가 든 ETF가 나중에 추가될 때 조용히 빠진다).
 LATE = tuple(e["name"] for e in P.ETFS if e.get("lag"))
+
+# ── 무한 정지 안전장치 ─────────────────────────────────────────
+# 2026-10-21 09:32 회차(#705)가 일일 리포트 계산 중 아무 로그 없이 멈췄고, 180분 잡 제한에 걸릴 때까지
+# 같은 concurrency 그룹의 다음 회차들이 전부 대기열에 묶였다. 원인은 기록이 없어 모른다.
+# → 구간마다 감시 타이머: 넘기면 모든 스레드의 스택을 로그에 남기고(원인 추적) 프로세스를 끝낸다.
+#   커밋 단계는 if: always() 라 그때까지의 캡처는 레포에 남고, 발송 마커는 보내는 즉시 따로 올린다.
+@contextmanager
+def guard(minutes):
+    faulthandler.dump_traceback_later(minutes * 60, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+# ── 발송 마커: 레포(원격)에서 직접 확인·기록 ─────────────────────
+# 대기열에 섰던 회차는 '생성 시점' 커밋을 checkout 한다(2026-10-21 #707). 그 사이 앞 회차가 보내고 마커를
+# 올렸어도 이 회차의 작업트리엔 마커가 없다 → 그대로면 같은 날 방에 한 번 더 보낸다.
+# 그래서 ① 발송 판단 직전에 원격 main의 마커를 GitHub API로 확인하고 ② 보내자마자 마커를 API로 바로 올린다
+# (잡 끝 커밋 단계가 실패·중단돼도 마커는 남게). 토큰이 없으면(로컬 실행) 로컬 파일만 본다.
+MARK = "1\n"
+
+def _gh(method, path, body=None):
+    tok, repo = os.getenv("GITHUB_TOKEN"), os.getenv("GITHUB_REPOSITORY")
+    if not (tok and repo):
+        return None
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/{path}", method=method,
+                                 data=(json.dumps(body).encode("utf-8") if body is not None else None),
+                                 headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json",
+                                          "Content-Type": "application/json", "User-Agent": "etf-daily"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return None
+
+def sync_marker(path):
+    """원격 main에 이 마커가 있으면 로컬에도 만들고 True. 로컬에 이미 있어도 True."""
+    if os.path.exists(path):
+        return True
+    if _gh("GET", f"contents/reports/{os.path.basename(path)}?ref=main") == 200:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f: f.write(MARK)
+        log(f"  [마커] 원격에 {os.path.basename(path)} 있음 — 오늘 이미 발송된 것으로 처리")
+        return True
+    return False
+
+def publish_marker(name):
+    st = _gh("PUT", f"contents/reports/{name}",
+             {"message": f"발송 마커 {name}", "branch": "main", "content": base64.b64encode(MARK.encode()).decode()})
+    if st is None: return
+    log(f"  [마커] 레포에 바로 기록 {'완료' if st in (200, 201) else f'실패(HTTP {st}) — 잡 끝 커밋에서 다시 올림'}")
 
 DEGRADE_AFTER = 3   # 연속 이 거래일 수만큼 결측이면 '장기 파손'으로 보고 완결 판정에서 뺀다
 MAX_DEGRADED = 2    # 이보다 많이 깨졌으면 자동 제외하지 않는다(껍데기 리포트가 나가는 것 방지)
@@ -122,51 +176,21 @@ def wait_until_sendable(ctx, today):
         nap = max(30.0, min(nap, (WAIT_MAX_MIN - spent) * 60.0))
         log(f"  [대기] {why} — {nap/60:.0f}분 후 재수집 (누적 {spent:.0f}분, 상한 {WAIT_MAX_MIN})")
         time.sleep(nap)
-        nc = P.run(today, weekly=False)               # 증분 재수집(주간은 나중에 한 번만)
+        with guard(30):
+            nc = P.run(today, weekly=False)           # 증분 재수집(주간은 나중에 한 번만)
         if nc: ctx = nc
-
-# ── 임시 진단(2026-10-21~): FunETF가 아침에 '당일' PDF를 주는지, GitHub 러너에서 열리는지 ──
-# 되면 TIGER 2종·MIDAS·RISE를 WiseReport(전일분) → FunETF(당일분)로 바꾼다. 판정이 끝나면 이 블록과 호출 2곳을 삭제.
-# 지문 = (종목명, 1CU수량) 정렬 목록의 md5 앞 8자 → 로컬에서 운용사 원본 PDF로 같은 방식으로 계산해 대조한다.
-FUNETF_PROBE = (("0204S0", "TIGER 코스닥"), ("0168K0", "TIGER 기술이전"), ("0191B0", "MIDAS"), ("0000Z0", "RISE"))
-
-def _isin(code):
-    """KRX 단축코드 → ISIN(KR7+코드+00+체크디지트, 문자→숫자 변환 후 Luhn)."""
-    s = "KR7" + code + "00"; digits = "".join(str(int(c, 36)) for c in s); tot = 0
-    for i, ch in enumerate(reversed(digits)):
-        n = int(ch) * (2 if i % 2 == 0 else 1); tot += n // 10 + n % 10
-    return s + str((10 - tot % 10) % 10)
-
-def probe_funetf(tag):
-    import re, json, time, hashlib, requests
-    for code, nm in FUNETF_PROBE:
-        t0 = time.time()
-        try:
-            r = requests.get(f"https://www.funetf.co.kr/product/etf/view/{_isin(code)}",
-                             headers={"User-Agent": P.UA}, timeout=8)
-            ymd = (re.findall(r"etfPdfYmd\s*=\s*['\"]?(\d{8})", r.text) or ["?"])[0]
-            m = re.search(r"setPdfChart\(\s*(\[.*?\])\s*\)", r.text, re.S)
-            rows = json.loads(m.group(1)) if m else []
-            q = sorted((str(x.get("citmNm", "")).strip(), float(x.get("icuStkc") or 0)) for x in rows)
-            q = [(n, v) for n, v in q if n and not any(s in n for s in P.SKIP)]
-            fp = hashlib.md5(json.dumps(q, ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
-            log(f"  [FunETF 진단·{tag}] {nm}: HTTP {r.status_code} {time.time()-t0:.1f}s 기준일 {ymd} 종목 {len(q)} 지문 {fp}")
-        except Exception as ex:
-            log(f"  [FunETF 진단·{tag}] {nm}: {type(ex).__name__} {str(ex)[:80]} ({time.time()-t0:.1f}s) — 나머지 생략")
-            return   # 같은 호스트라 나머지도 같은 결과 → 시간 낭비 방지
 
 def main():
     today = datetime.date.today()
     if not P.is_trading_day(today):
         log(f"{today} 휴장일 — 종료"); return
     ymd = today.strftime("%Y%m%d")
-    try: probe_funetf("시작")
-    except Exception: pass
 
     log("1) 일일 리포트")
     # weekly=False: 주간 리포트는 대기가 끝난 뒤(데이터가 가장 많이 찬 시점) 한 번만 만든다.
     # 대기 루프가 폴링마다 주간을 재생성하면 운용사 서버를 수십 번 더 두드린다.
-    ctx = P.run(today, weekly=False)    # pdf_change_YYYYMMDD.xlsx
+    with guard(30):
+        ctx = P.run(today, weekly=False)    # pdf_change_YYYYMMDD.xlsx
     # ── 대시보드 업로드 ──────────────────────────────────
     # 리포트가 만들어진 직후, 발송 여부와 무관하게 올린다.
     # (발송은 완결 판정을 기다리지만 대시보드는 부분치라도 보이는 편이 낫다 —
@@ -177,7 +201,7 @@ def main():
     send_win = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")   # 발송 후보 실행인가
     done_mk = [os.path.join(APP, "reports", f".tg_sent_{ymd}"),
                os.path.join(APP, "reports", f".tg_sent2_{ymd}")]
-    already = all(os.path.exists(m) for m in done_mk)   # 오늘 이미 다 보냈으면 기다릴 이유 없다
+    already = all([sync_marker(m) for m in done_mk])     # 오늘 이미 다 보냈으면(원격 포함) 기다릴 이유 없다
     if send_win and not already:
         ctx, st = wait_until_sendable(ctx, today)       # ★ 크론 사이가 아니라 잡 안에서 대기
         _push_dash(ctx, today)                          # 대기 동안 채워진 것을 대시보드에 반영
@@ -198,10 +222,12 @@ def main():
             if not (tok and chat): log(f"  [{label}] 대상 미설정 — 스킵"); return
             if not send: log(f"  [{label}] 전송 시각 아님 — 렌더만"); return
             m = os.path.join(APP, "reports", marker_name)
-            if os.path.exists(m): log(f"  [{label}] 오늘 이미 발송 — 스킵"); return
+            if sync_marker(m): log(f"  [{label}] 오늘 이미 발송 — 스킵"); return
             if P.send_telegram(png, cap, token=tok, chat=chat):
-                os.makedirs(os.path.dirname(m), exist_ok=True); open(m, "w").close()
+                os.makedirs(os.path.dirname(m), exist_ok=True)
+                with open(m, "w") as f: f.write(MARK)
                 log(f"  [{label}] 전송 완료 — 잠금 생성")
+                publish_marker(marker_name)
         except Exception as e:
             log(f"  [{label}] 실패: {type(e).__name__}: {e}")
     # 채널1: 기존(색상·가로) @pefscreener
@@ -210,19 +236,20 @@ def main():
     # 채널2: 신규(무채색·모바일 세로)
     deliver("채널2", P.render_report_image_mobile(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"]),
             os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_CHAT_ID2"), f".tg_sent2_{ymd}")
-    try: probe_funetf("발송 시점")
-    except Exception: pass
     # 주간 리포트 — 대기까지 끝난 뒤 한 번만(그 주 마지막 거래일에만)
     if P.is_last_trading_day_of_week(today):
-        try: P.weekly_report(today)
-        except Exception as ex: log(f"  [주간] 생성 실패: {type(ex).__name__}: {ex}")
+        with guard(20):
+            try: P.weekly_report(today)
+            except Exception as ex: log(f"  [주간] 생성 실패: {type(ex).__name__}: {ex}")
 
     log("2) 최근 5거래일 롤링")
-    try: P.rolling_report(today, 5)    # pdf_rolling5_YYYYMMDD.xlsx
-    except Exception as e: log(f"  롤링 실패: {type(e).__name__}: {e}")
+    with guard(20):
+        try: P.rolling_report(today, 5)    # pdf_rolling5_YYYYMMDD.xlsx
+        except Exception as e: log(f"  롤링 실패: {type(e).__name__}: {e}")
     log("3) 포트폴리오 차트")
-    try: PC.generate(today)            # portfolio_YYYYMMDD.png
-    except Exception as e: log(f"  차트 실패: {type(e).__name__}: {e}")
+    with guard(20):
+        try: PC.generate(today)            # portfolio_YYYYMMDD.png
+        except Exception as e: log(f"  차트 실패: {type(e).__name__}: {e}")
 
     # 4) 오늘 산출물 업로드
     targets = []
