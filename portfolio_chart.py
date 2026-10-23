@@ -144,11 +144,15 @@ def trading_days(today, n):
     return sorted(days)  # 과거→현재
 
 def build_series(fn, eid, dates):
-    """{date: {종목명: 비중}} — 데이터 있는 날짜만."""
+    """{date: {종목명: 비중}} — 데이터 있는 날짜만.
+    접속 자체가 안 되는 소스(클라우드에서 RISE 구도메인·미래에셋 등)는 첫 실패에서 멈춘다 —
+    날짜마다 20초씩 기다리느라 이 단계가 회차마다 8분 걸렸다(2026-10-23 실측)."""
     series = {}
     for d in dates:
         try:
             rows = fn(eid, d.strftime("%Y%m%d"))
+        except requests.exceptions.ConnectionError:
+            break
         except Exception:
             rows = []
         if rows:
