@@ -147,12 +147,38 @@ def fetch_plus(n, ymd):
 #           그래야 run()의 `if tm and ta == t_ymd` 판정이 '대기'로 잡아준다.
 # 주의 2) JSON items는 상위 30종목 상한. total_count가 더 크면 같은 URL의 xlsx(전체)로 교체한다.
 #         보강 실패 시 잘린 바스켓을 쓰면 나머지가 전부 '편출'로 오탐되므로 빈값을 반환해 '대기'로 넘긴다.
+# 주의 3) 2026-10-06부터 kbam.co.kr이 GitHub 러너에서 접속 시간초과(한국에선 정상) → RISE가 리포트에서 통째로 빠졌다.
+#         첫 접속 실패에서 이번 실행 동안은 건너뛰고(같은 결과에 회차마다 4분씩 쓰던 것) FunETF → WiseReport로 받는다.
+#         둘 다 최신분만 주므로 아침엔 전일분 → ETFS에서 "lag":True.
+_KBAM_DOWN = False
+_RISE_KRX = {"44I0": "0000Z0"}   # stid → KRX 단축코드(FunETF·WiseReport 폴백용)
+
 def fetch_rise(stid, ymd):
+    global _KBAM_DOWN
+    out, actual = {}, ""
+    if not _KBAM_DOWN:
+        try:
+            out, actual = _rise_direct(stid, ymd)
+        except requests.exceptions.ConnectionError as ex:      # ConnectTimeout 포함
+            _KBAM_DOWN = True
+            print(f"  [RISE] kbam.co.kr 접속 실패({type(ex).__name__}) → 이번 실행에선 FunETF로", flush=True)
+    if out:
+        return out, actual          # 운용사 원본이 답하면 날짜가 늦어도 그대로(정직한 기준일)
+    code = _RISE_KRX.get(stid, "")
+    if not code:
+        return {}, ""
+    fm, fd = fetch_funetf(krx_isin(code), key=stid)
+    if fm:
+        print(f"  [RISE] FunETF 폴백 {len(fm)}종목 (기준일 {fd})", flush=True)
+        return fm, fd
+    return fetch_wisereport(code, ymd)
+
+def _rise_direct(stid, ymd):
     hdr = {"User-Agent": UA, "Accept-Language": "ko-KR",
            "Referer": f"https://kbam.co.kr/products/{stid}"}
     url = f"https://kbam.co.kr/api/products/etfs/{stid}/holdings"
     r = requests.get(url, params={"base_dt": ymd},
-                     headers=dict(hdr, Accept="application/json"), timeout=20)
+                     headers=dict(hdr, Accept="application/json"), timeout=(5, 20))
     try:
         j = r.json()
     except Exception:
@@ -169,7 +195,7 @@ def fetch_rise(stid, ymd):
         try:
             import pandas as pd, io as _io
             x = requests.get(url, params={"download": "xlsx", "base_dt": actual},
-                             headers=hdr, timeout=30)
+                             headers=hdr, timeout=(5, 30))
             df = pd.read_excel(_io.BytesIO(x.content))   # [종목코드,종목명,수량(주),보유비중(%),평가금액(원)]
             c_nm = next(c for c in df.columns if "종목명" in str(c))
             c_q = next(c for c in df.columns if "수량" in str(c))
@@ -219,9 +245,13 @@ def _tiger_rows(text):
             rows.append(cells)
     return rows
 
+_MIRAE_DOWN = False   # 러너가 403을 받으면 이번 실행 동안은 미래에셋 직접 호출을 건너뛴다(매번 같은 403, 시간만 듦)
+
 def _tiger_raw(isin, ymd, tries=3):
     """운용사 직접 호출 → 응답 text. POST·세션워밍업 불필요(GET 한 번으로 동일 본문, 실측 확인)."""
+    global _MIRAE_DOWN
     import time
+    if _MIRAE_DOWN: return ""
     base = "https://investments.miraeasset.com/tigeretf/ko/product/search/detail"
     hdr = {"User-Agent": UA, "Accept": "text/html, */*; q=0.01",
            "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
@@ -235,6 +265,10 @@ def _tiger_raw(isin, ymd, tries=3):
             r = requests.get(f"{base}/pdfListAjax.ajax", params=params, headers=hdr, timeout=25)
             if r.status_code == 200 and _tiger_rows(r.text):
                 return r.text
+            if r.status_code == 403:                    # 러너 IP 차단(WAF) — 재시도해도 같다
+                _MIRAE_DOWN = True
+                print(f"  [TIGER] 미래에셋 HTTP 403(러너 차단) → 이번 실행에선 FunETF로", flush=True)
+                return ""
             last = f"HTTP {r.status_code} len={len(r.text)} head={r.text[:140]!r}"
         except Exception as ex:
             last = f"{type(ex).__name__}: {str(ex)[:140]}"
@@ -287,8 +321,12 @@ def fetch_tiger(isin, ymd):
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, (ev / q if (q and ev) else None)]
     if out: return out, ymd
-    # 운용사 직접이 비면 폴백. 평가금액이 없어 단가는 None → 기존 종가 폴백(_px)이 채운다.
-    # ★ 요청일이 아니라 WiseReport가 보고한 실제 기준일을 반환한다(묵은 바스켓의 당일 위장 방지).
+    # 운용사 직접이 비면 폴백: FunETF(평가금액·현금 포함, 러너 접속 안정) → WiseReport(단가 없음 → KRX 종가).
+    # ★ 둘 다 최신분만 준다. 요청일이 아니라 소스가 보고한 실제 기준일을 반환한다(묵은 바스켓의 당일 위장 방지).
+    fm, fd = fetch_funetf(isin, key=isin)
+    if fm:
+        print(f"  [TIGER] FunETF 폴백 {len(fm)}종목 (기준일 {fd})", flush=True)
+        return fm, fd
     rows, src = _tiger_wisereport(_TIGER_KRX.get(isin, ""))
     for it in rows:
         nm = str(it.get("STK_NM_KOR", "")).strip()
@@ -335,7 +373,7 @@ def fetch_db(code):
             except (ValueError, TypeError): pass
     return out, (d or "").replace("-", "")
 
-# ── fetcher: WiseReport(네이버) CU 구성 — 자체 사이트에 PDF가 없는 운용사(MIDAS)용 ──
+# ── fetcher: WiseReport(네이버) CU 구성 — FunETF까지 실패했을 때의 최후 폴백(TIGER·RISE·MIDAS) ──
 # 실측(2026-10-16 15시): TRD_DT는 PDF 게시일 기준이고 당일분이 아니라 '전일 PDF'다
 # (KoAct 10-15 PDF와 74/74 일치, 10-16과 불일치). → 이 소스를 쓰는 ETF는 "lag":True 로 등록해 전일분으로 표시.
 def fetch_wisereport(krx, ymd):
@@ -351,6 +389,59 @@ def fetch_wisereport(krx, ymd):
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, None]
     return (out, src) if out else ({}, "")
+
+def krx_isin(code):
+    """KRX 단축코드 → ISIN (KR7+코드+00+체크디지트: 문자를 숫자로 바꾼 뒤 Luhn). 예: 0191B0 → KR70191B0000."""
+    s = "KR7" + code + "00"; digits = "".join(str(int(c, 36)) for c in s); tot = 0
+    for i, ch in enumerate(reversed(digits)):
+        n = int(ch) * (2 if i % 2 == 0 else 1); tot += n // 10 + n % 10
+    return s + str((10 - tot % 10) % 10)
+
+# ── fetcher: FunETF(funetf.co.kr) — 운용사 원본과 같은 PDF를 상품 페이지에 서버렌더로 싣는다 ──
+# 2026-10-21~23 러너 로그 132회 실측: GitHub 러너에서 접속 132/132, 당일분 내용은 운용사 원본과 9/9 지문 일치.
+# 단 당일분 갱신이 07:20~08:37 사이라 아침 발송 시각엔 전날 PDF다 → lag ETF의 전일분 소스로 쓴다(WiseReport보다 안정,
+# 종목별 평가금액·원화현금 포함). 최신분만 주므로 ymd는 받지 않고 실제 기준일(etfPdfYmd)을 반환한다.
+_FUNETF_DOWN = False
+
+def fetch_funetf(isin, key=None):
+    """FunETF 상품 페이지 → ({종목: [1CU수량, 단가]}, PDF기준일). 원화현금 행은 key(기본 isin)의 1CU 현금으로 기록."""
+    global _FUNETF_DOWN
+    import re
+    if _FUNETF_DOWN: return {}, ""
+    try:
+        r = requests.get(f"https://www.funetf.co.kr/product/etf/view/{isin}",
+                         headers={"User-Agent": UA, "Accept-Language": "ko-KR"}, timeout=(5, 25))
+    except requests.exceptions.ConnectionError as ex:      # ConnectTimeout 포함 — 이번 실행 동안은 같은 결과
+        _FUNETF_DOWN = True
+        print(f"  [FunETF] 접속 실패({type(ex).__name__}) → 이번 실행에선 건너뜀", flush=True)
+        return {}, ""
+    d = re.findall(r"etfPdfYmd\s*=\s*['\"]?(\d{8})", r.text)
+    m = re.search(r"setPdfChart\(\s*(\[.*?\])\s*\)", r.text, re.S)
+    if r.status_code != 200 or not d or not m:
+        print(f"  [FunETF {isin}] 구성종목 없음 → HTTP {r.status_code} len={len(r.text)}", flush=True)
+        return {}, ""
+    try: rows = json.loads(m.group(1))
+    except ValueError: return {}, ""
+    ymd, key = d[0], (key or isin)
+    _CASH_CACHE.pop((key, ymd), None)        # 같은 날짜를 여러 번 받아도(대기 폴링·주간) 현금이 누적되지 않게
+    out = {}
+    for it in rows:
+        nm = str(it.get("citmNm") or "").strip()
+        if not nm: continue
+        try: q = float(it.get("icuStkc") or 0); ev = float(it.get("evAmt") or 0)
+        except (ValueError, TypeError): continue
+        if any(sk in nm for sk in SKIP) or not it.get("ticker"):
+            _note_cash(key, ymd, nm, ev); continue
+        if q <= 0: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if ev else None)]
+    return (out, ymd) if out else ({}, "")
+
+def fetch_mirror(code, ymd):
+    """자체 사이트에 PDF가 없는 운용사(MIDAS)용: FunETF → WiseReport. 둘 다 최신분만(아침엔 전일분)."""
+    fm, fd = fetch_funetf(krx_isin(code), key=code)
+    if fm: return fm, fd
+    return fetch_wisereport(code, ymd)
 
 # ── fetcher: DS자산운용(dsetf.com) — Next.js 서버렌더 페이지에 최신·직전일 바스켓(수량·평가금액·현금)이 통째로 들어있다 ──
 # 날짜 표기 주의: 사이트의 latestHoldingsDate 는 '보유일(종가 시점)'이라 다른 운용사 PDF 기준일보다 하루 앞서 보인다.
@@ -435,14 +526,15 @@ ETFS = [
     {"name":"TIME 코스닥액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"24","krx":"0162Y0","cu":50000},
     {"name":"TIME K바이오액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"13","krx":"463050","cu":50000},
     {"name":"PLUS 코스닥150액티브","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399","krx":"0166N0","cu":50000},
-    {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000},
+    {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000,"lag":True},  # 클라우드는 kbam 접속 불가 → FunETF 전일분(2026-10-23)
     {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":10000,"lag":True},  # CU=10000 (좌수/CU 정수검증으로 확정; 기존 config 20000은 오류)
-    # 2026-10-16 추가: 코스닥액티브 나머지 3종. "lag":True = 당일분이 늦거나 전일 PDF까지만 오는 ETF(클라우드의 TIGER=403→WiseReport, MIDAS=WiseReport)
+    # 2026-10-16 추가: 코스닥액티브 나머지 3종. "lag":True = 당일분이 늦거나 전일 PDF까지만 오는 ETF
+    #   (클라우드의 TIGER=403·RISE=접속불가 → FunETF/WiseReport, MIDAS=원본 없음 → FunETF/WiseReport. 둘 다 아침엔 전날 PDF)
     #   → 당일분이 없으면 '전일분'으로 표시(run()의 전일분 모드)하고, 아침 발송 완결 판정에서 빠진다(run_daily.LATE).
     #   DS는 자체 사이트가 당일분을 주지만(전일 장 마감 후 갱신) 게시 시각이 검증 전이라 안전망으로 lag.
     {"name":"DS 코스닥액티브","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000,"lag":True},  # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
     {"name":"TIGER 코스닥액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70204S0006","krx":"0204S0","cu":10000,"lag":True},  # CU=10000 (좌수 정수검증)
-    {"name":"MIDAS 코스닥액티브","am":"마이다스","mode":"dateapi","fetch":fetch_wisereport,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
+    {"name":"MIDAS 코스닥액티브","am":"마이다스","mode":"dateapi","fetch":fetch_mirror,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
     #   fetch_unicorn·fetch_db 함수는 코드에 유지 → 재추가 가능.
 ]
