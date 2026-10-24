@@ -1033,5 +1033,40 @@
 "code": "127120",
 "sector": null,
 "market": "KOSDAQ"
+},
+"LS마린솔루션": {
+"code": "060370",
+"sector": null,
+"market": "KOSDAQ"
+},
+"에스엠": {
+"code": "041510",
+"sector": null,
+"market": "KOSDAQ"
+},
+"에코프로에이치엔": {
+"code": "383310",
+"sector": null,
+"market": "KOSDAQ"
+},
+"엘리스": {
+"code": "0158S0",
+"sector": null,
+"market": "KOSDAQ"
+},
+"지씨지놈": {
+"code": "340450",
+"sector": null,
+"market": "KOSDAQ"
+},
+"파인엠텍": {
+"code": "441270",
+"sector": null,
+"market": "KOSDAQ"
+},
+"프로티나": {
+"code": "468530",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
