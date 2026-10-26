@@ -230,12 +230,23 @@ def main():
                 publish_marker(marker_name)
         except Exception as e:
             log(f"  [{label}] 실패: {type(e).__name__}: {e}")
-    # 채널1: 기존(색상·가로) @pefscreener
-    deliver("채널1", P.render_report_image(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"]),
-            os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID"), f".tg_sent_{ymd}")
-    # 채널2: 신규(무채색·모바일 세로)
-    deliver("채널2", P.render_report_image_mobile(ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"]),
-            os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_CHAT_ID2"), f".tg_sent2_{ymd}")
+    # 길면 ETF 단위로 여러 장 → 앨범(2026-10-26 10종·94행 날 모바일 1장이 텔레그램 사진 한계를 넘어 파일로 나갔다)
+    pngs1 = P.render_report_parts("wide", ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])     # 채널1: 색상·가로
+    pngs2 = P.render_report_parts("mobile", ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])   # 채널2: 무채색·모바일
+    if os.getenv("DM_TEST", "").lower() == "true":
+        # 수동 점검 전용(workflow_dispatch dm_test): 두 형식을 사용자 DM(봇2)으로만 보낸다.
+        # 방 발송·발송 마커 없음 — force_send 를 같이 켜도 방으로는 안 나간다.
+        dm, tok2 = os.getenv("TELEGRAM_DM_ID"), os.getenv("TELEGRAM_TOKEN2")
+        for label, pngs in (("채널1 형식", pngs1), ("채널2 형식", pngs2)):
+            if not (pngs and dm and tok2):
+                log(f"  [DM 점검] {label}: 보낼 것 없음 또는 DM 미설정 — 스킵"); continue
+            ok = P.send_telegram(pngs, f"[DM 점검 · {label} · {len(pngs)}장]\n{cap}", token=tok2, chat=dm)
+            log(f"  [DM 점검] {label} {len(pngs)}장 → {'완료' if ok else '실패'}")
+    else:
+        # 채널1: 기존(색상·가로) @pefscreener
+        deliver("채널1", pngs1, os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID"), f".tg_sent_{ymd}")
+        # 채널2: 신규(무채색·모바일 세로)
+        deliver("채널2", pngs2, os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_CHAT_ID2"), f".tg_sent2_{ymd}")
     # 주간 리포트 — 대기까지 끝난 뒤 한 번만(그 주 마지막 거래일에만)
     if P.is_last_trading_day_of_week(today):
         with guard(20):
@@ -253,7 +264,7 @@ def main():
 
     # 4) 오늘 산출물 업로드
     targets = []
-    for pat in (f"pdf_change_{ymd}.xlsx", f"pdf_change_{ymd}.png", f"pdf_change_m_{ymd}.png",
+    for pat in (f"pdf_change_{ymd}.xlsx", f"pdf_change_{ymd}*.png", f"pdf_change_m_{ymd}*.png",   # *: 여러 장(_1·_2…)
                 f"pdf_weekly_{ymd}.xlsx", f"pdf_rolling5_{ymd}.xlsx", f"portfolio_{ymd}.png"):
         targets += glob.glob(os.path.join(APP, pat))
     if not targets:
