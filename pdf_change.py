@@ -1166,8 +1166,9 @@ def _eok(x):
     return "-" if x is None else f"{x/1e8:+,.1f}억"
 
 def render_report_image(groups, today, prev, status_line="", title=None,
-                        lbl_cur="당일", lbl_prev="전영업일", out_png=None):
-    """엑셀 표를 한 장의 PNG로 렌더(ETF별 매수/매도). 반환: 경로, 변화 없으면 None."""
+                        lbl_cur="당일", lbl_prev="전영업일", out_png=None, part=None):
+    """엑셀 표를 한 장의 PNG로 렌더(ETF별 매수/매도). 반환: 경로, 변화 없으면 None.
+    part=(i, n) 이면 여러 장 중 i번째 — 제목에 (i/n) 표시(render_report_parts 가 나눠 부른다)."""
     _setup_mpl_font()
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
@@ -1227,15 +1228,17 @@ def render_report_image(groups, today, prev, status_line="", title=None,
                 if s: t.set_fontsize(max(6.5, min(10, 10 * 13 / len(s))))
     sub = f"\n{status_line}" if status_line else ""
     sup = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pdd}"
+    if part: sup += f"   ({part[0]}/{part[1]})"
     fig.suptitle(sup + sub, fontsize=13, fontweight="bold", y=1 - 0.12 / fig_h, va="top")
     out_png = out_png or os.path.join(BASE, f"pdf_change_{today.strftime('%Y%m%d')}.png")
     fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return out_png
 
 def render_report_image_mobile(groups, today, prev, status_line="", title=None,
-                               lbl_cur="당일", lbl_prev="전영업일", out_png=None):
+                               lbl_cur="당일", lbl_prev="전영업일", out_png=None, part=None, totals=None):
     """모바일 세로 표형(무채색). ETF명 → ▼매수 → ▼매도, 정보는 칸(셀)으로 구분.
-    글자 크게 + 양옆 여백 최소."""
+    글자 크게 + 양옆 여백 최소. part=(i, n)·totals=(ETF수, 매수, 매도) 는 여러 장으로 나눌 때 —
+    제목에 (i/n), 요약줄은 이 장이 아니라 전체 합계."""
     _setup_mpl_font()
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
@@ -1311,15 +1314,106 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
                     fontweight="bold", fontsize=11.5, clip_on=False, zorder=5)
         cum += HU[st]
     n = len(caps)
+    if totals: n, tot_b, tot_s = totals
     summary = f"변화 {n}개 ETF  ·  매수 {tot_b} / 매도 {tot_s} 종목"
-    sup = title or f"코스닥 액티브 ETF PDF 변화\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
+    head = "코스닥 액티브 ETF PDF 변화" + (f"  ({part[0]}/{part[1]})" if part else "")
+    sup = title or f"{head}\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
     fig.suptitle(f"{sup}\n{summary}", fontsize=11.5, fontweight="bold", y=1 - 0.12 / fig_h, va="top")
     out_png = out_png or os.path.join(BASE, f"pdf_change_m_{today.strftime('%Y%m%d')}.png")
     fig.savefig(out_png, bbox_inches="tight", facecolor="white"); plt.close(fig)
     return out_png
 
+# ── 길면 여러 장으로 ─────────────────────────────────────────────
+# 텔레그램 사진은 가로+세로 ≤ 10000px(넘으면 PHOTO_INVALID_DIMENSIONS → 파일로 감)이고, 길수록 축소돼 글자가 작아진다.
+# 2026-10-26(10종·94행) 모바일 1089×9618px가 파일로, 가로형 2108×7303px는 작게 나갔다.
+# → 한 장 세로가 MAX_PART_PX를 넘으면 ETF 단위로(한 ETF는 쪼개지 않음) 나눠 앨범으로 보낸다. 보통 날은 그대로 1장.
+MAX_PART_PX = 5000
+
+def _est_px_wide(gs):
+    """render_report_image 의 ETF 표 높이(px) 추정: (행수+1.6)×0.6in × 170dpi."""
+    return sum((max(len(g["buy"]), len(g["sell"])) + 1.6) * 0.6 * 170 for g in gs)
+
+def _est_px_mobile(gs):
+    """render_report_image_mobile 의 표 높이(px) 추정: 행 단위(HU) × 0.235in × 205dpi."""
+    u = 0.0
+    for i, g in enumerate(gs):
+        u += (1.4 if i else 0) + 1.25 + 1.0 + 1.75 * max(1, len(g["buy"])) + 1.0 + 1.75 * max(1, len(g["sell"]))
+    return u * 0.235 * 205
+
+def _split_caps(caps, est, base_px, max_px=MAX_PART_PX):
+    """장 수는 최소로, 장마다 높이는 고르게. 다음 ETF를 넣으면 목표 높이를 절반 넘게 넘길 때 새 장을 시작한다."""
+    if base_px + est(caps) <= max_px or len(caps) < 2:
+        return [caps]
+    k = 2
+    while True:
+        target = est(caps) / k
+        parts, cur = [], []
+        for g in caps:
+            if cur and len(parts) < k - 1 and est(cur + [g]) - est([g]) / 2 > target:
+                parts.append(cur); cur = []
+            cur.append(g)
+        parts.append(cur)
+        if all(base_px + est(p) <= max_px for p in parts) or k >= len(caps):
+            return parts
+        k += 1
+
+def render_report_parts(kind, groups, today, prev, status_line=""):
+    """kind='wide'(채널1) | 'mobile'(채널2) → [PNG 경로...]. 짧으면 기존 파일명 1장, 길면 _1·_2… 여러 장. 변화 없으면 []."""
+    caps = [g for g in groups if g["state"] == "captured" and (g["buy"] or g["sell"])]
+    if not caps:
+        return []
+    if kind == "wide":
+        render, est, base, stem = render_report_image, _est_px_wide, 330, "pdf_change"
+    else:
+        render, est, base, stem = render_report_image_mobile, _est_px_mobile, 330, "pdf_change_m"
+    parts = _split_caps(caps, est, base)
+    if len(parts) == 1:
+        return [render(groups, today, prev, status_line)]
+    ymd = today.strftime("%Y%m%d")
+    totals = (len(caps), sum(len(g["buy"]) for g in caps), sum(len(g["sell"]) for g in caps))
+    out = []
+    for i, p in enumerate(parts, 1):
+        kw = {"part": (i, len(parts)), "out_png": os.path.join(BASE, f"{stem}_{ymd}_{i}.png")}
+        if kind != "wide": kw["totals"] = totals
+        out.append(render(p, today, prev, status_line, **kw))
+    return out
+
+def _send_album(paths, caption="", token=None, chat=None):
+    """여러 장을 앨범(sendMediaGroup, 최대 10장씩)으로. 캡션은 첫 장. 앨범이 거부되면 한 장씩(사진→파일).
+    한 장이라도 나갔으면 True — 발송 마커를 남겨 다음 회차가 같은 날 다시 보내지 않게 한다."""
+    tok = token or os.environ.get("TELEGRAM_TOKEN"); chat = chat or os.environ.get("TELEGRAM_CHAT_ID")
+    if not (tok and chat):
+        print("  [텔레그램] 토큰/챗ID 미설정 — 전송 스킵"); return False
+    sent = False
+    for s in range(0, len(paths), 10):
+        chunk = paths[s:s + 10]
+        media = [dict({"type": "photo", "media": f"attach://p{i}"},
+                      **({"caption": caption[:1024]} if (s == 0 and i == 0 and caption) else {}))
+                 for i in range(len(chunk))]
+        files = {}; why = ""
+        try:
+            for i, p in enumerate(chunk): files[f"p{i}"] = open(p, "rb")
+            r = requests.post(f"https://api.telegram.org/bot{tok}/sendMediaGroup",
+                              data={"chat_id": chat, "media": json.dumps(media)}, files=files, timeout=120)
+            if r.ok and r.json().get("ok"):
+                print(f"  [텔레그램] 앨범 {len(chunk)}장 전송 완료"); sent = True; continue
+            why = r.text[:150]
+        except Exception as e:
+            why = f"{type(e).__name__}: {e}"
+        finally:
+            for f in files.values(): f.close()
+        print(f"  [텔레그램] 앨범 실패: {why} → 한 장씩")
+        for i, p in enumerate(chunk):
+            if send_telegram(p, caption if (s == 0 and i == 0) else "", token=tok, chat=chat): sent = True
+    return sent
+
 def send_telegram(png_path, caption="", token=None, chat=None):
-    """이미지 전송(sendPhoto→실패 시 sendDocument). token/chat 미지정 시 환경변수 사용."""
+    """이미지 전송(sendPhoto→실패 시 sendDocument). token/chat 미지정 시 환경변수 사용.
+    경로 목록을 주면 2장 이상은 앨범으로(_send_album)."""
+    if isinstance(png_path, (list, tuple)):
+        paths = [p for p in png_path if p and os.path.exists(p)]
+        if len(paths) > 1: return _send_album(paths, caption, token, chat)
+        png_path = paths[0] if paths else None
     tok = token or os.environ.get("TELEGRAM_TOKEN"); chat = chat or os.environ.get("TELEGRAM_CHAT_ID")
     if not (tok and chat):
         print("  [텔레그램] 토큰/챗ID 미설정 — 전송 스킵"); return False
