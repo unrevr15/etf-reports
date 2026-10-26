@@ -21,6 +21,10 @@ on:
         description: "외부 정시 스케줄러(Apps Script)가 07:05에 호출 — 정규 아침 회차로 취급(발송 후보)"
         type: boolean
         default: false
+      dm_test:
+        description: "점검용: 오늘 리포트 두 형식을 내 DM으로만 전송(방 발송·발송 마커 없음, force_send보다 우선)"
+        type: boolean
+        default: false
   # GitHub 예약 실행이 2026-08-26부터 수 시간 지연·누락(전역 장애, 미해결)되어
   # 외부(Google Apps Script)가 07:05 KST에 workflow_dispatch(morning=true)로 직접 깨운다.
   # 수동 실행은 여전히 force_send를 켜지 않으면 방으로 안 나간다.
@@ -85,6 +89,9 @@ jobs:
           TELEGRAM_SEND: ${{ github.event.schedule == '10,20,30,40 22 * * *' || github.event.schedule == '20,40 23 * * *' || github.event.schedule == '0 21,22,23 * * *' || github.event.schedule == '0 0,1 * * *' || (github.event_name == 'workflow_dispatch' && (inputs.force_send || inputs.morning)) }}
           # 발송 마커를 원격(main)에서 확인하고 보내자마자 바로 기록 — 대기열에 섰던 낡은 checkout의 중복 발송 방지
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 수동 점검: 켜면 방 대신 내 DM(봇2)으로만 보낸다
+          DM_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.dm_test }}
+          TELEGRAM_DM_ID: ${{ secrets.TELEGRAM_DM_ID }}
         run: python -u cloud/run_daily.py
 
       - name: 리포트를 레포에 커밋 (reports/)
