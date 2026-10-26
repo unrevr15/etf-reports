@@ -1188,8 +1188,8 @@ def render_report_image(groups, today, prev, status_line="", title=None,
         buy = sorted(g["buy"], key=lambda r: -r["변화"]); sell = sorted(g["sell"], key=lambda r: r["변화"])
         aum = g.get("aum")
         _cl = _cashlabel(g)
-        ttl = f"■ {g['etf']}  ({g['am']})" + _lagtag(g, "   ") + (f"   순자산 약 {aum/1e8:,.0f}억" if aum else "") + \
-              (f"   ·   {_cl}" if _cl else "") + f"      매수 {len(buy)}  /  매도 {len(sell)}"
+        ttl = f"■ {_chunk_name(g)}  ({g['am']})" + _lagtag(g, "   ") + (f"   순자산 약 {aum/1e8:,.0f}억" if aum else "") + \
+              (f"   ·   {_cl}" if _cl else "") + f"      매수 {g.get('n_buy', len(buy))}  /  매도 {g.get('n_sell', len(sell))}"
         ax.set_title(ttl, loc="left", fontsize=11, fontweight="bold", color="#1F3864", pad=6)
         n = max(len(buy), len(sell))
         cols = ["매수 종목", "변화(전→당)", "금액", "보유비중", "", "매도 종목", "변화(전→당)", "금액", "보유비중"]
@@ -1263,19 +1263,24 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
         if gi > 0: rows.append(["", "", "", ""]); styles.append("gap")
         aum = g.get("aum")
         _cl = _cashlabel(g)
-        banners[len(rows)] = f"■ {g['etf']} ({g['am']})" + _lagtag(g, "  ") + (f"  ·  {aum/1e8:,.0f}억" if aum else "") + \
+        banners[len(rows)] = f"■ {_chunk_name(g)} ({g['am']})" + _lagtag(g, "  ") + (f"  ·  {aum/1e8:,.0f}억" if aum else "") + \
                              (f"  ·  {_cl}" if _cl else "")
         rows.append(["", "", "", ""]); styles.append("etf")   # 배너는 표 위에 겹쳐 그림(잘림 방지)
-        rows.append([f"▼ 매수 {len(buy)}", "", "", ""]); styles.append("sect")
-        for b in (buy or [None]):
-            rows.append(["(없음)", "", "", ""] if b is None else
-                        [_namecell(b, short=True), _chc(b), _amtcell(b, short=True), _hold(b)])
-            styles.append("data")
-        rows.append([f"▼ 매도 {len(sell)}", "", "", ""]); styles.append("sect")
-        for s in (sell or [None]):
-            rows.append(["(없음)", "", "", ""] if s is None else
-                        [_namecell(s, short=True), _chc(s), _amtcell(s, short=True), _hold(s)])
-            styles.append("data")
+        show_b, show_s = _mobile_sections(g)                 # 여러 장에 걸친 ETF 조각은 행이 있는 섹션만
+        if show_b:
+            rows.append([f"▼ 매수 {g.get('n_buy', len(buy))}" + (" (계속)" if g.get("cont_buy") else ""), "", "", ""])
+            styles.append("sect")
+            for b in (buy or [None]):
+                rows.append(["(없음)", "", "", ""] if b is None else
+                            [_namecell(b, short=True), _chc(b), _amtcell(b, short=True), _hold(b)])
+                styles.append("data")
+        if show_s:
+            rows.append([f"▼ 매도 {g.get('n_sell', len(sell))}" + (" (계속)" if g.get("cont_sell") else ""), "", "", ""])
+            styles.append("sect")
+            for s in (sell or [None]):
+                rows.append(["(없음)", "", "", ""] if s is None else
+                            [_namecell(s, short=True), _chc(s), _amtcell(s, short=True), _hold(s)])
+                styles.append("data")
     HU = {"hdr": 1.0, "etf": 1.25, "sect": 1.0, "data": 1.75, "gap": 1.4}   # 행 높이(상대)
     units = sum(HU[s] for s in styles)
     title_in = 1.05
@@ -1326,8 +1331,26 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
 # ── 길면 여러 장으로 ─────────────────────────────────────────────
 # 텔레그램 사진은 가로+세로 ≤ 10000px(넘으면 PHOTO_INVALID_DIMENSIONS → 파일로 감)이고, 길수록 축소돼 글자가 작아진다.
 # 2026-10-26(10종·94행) 모바일 1089×9618px가 파일로, 가로형 2108×7303px는 작게 나갔다.
-# → 한 장 세로가 MAX_PART_PX를 넘으면 ETF 단위로(한 ETF는 쪼개지 않음) 나눠 앨범으로 보낸다. 보통 날은 그대로 1장.
-MAX_PART_PX = 5000
+# → 한 장 세로가 MAX_PART_PX를 넘으면 나눠 앨범으로 보낸다. 작은 ETF끼리는 한 장에 모으고,
+#   한 장보다 큰 ETF는 행 단위로 고르게 쪼갠다(이름 뒤 (1/2), 매수·매도 건수는 전체 그대로).
+# 상한은 PC에서도 편하게(2026-10-26 사용자 요청): 텔레그램 PC 뷰어는 사진을 창 높이(1080p 기준 약 950px)에 맞춰
+# 줄이므로 세로로 긴 장은 글자가 작아진다(가로형 2107×4447px → 약 1/4). 가로형은 세로 ≤1600(화면에 약 0.6배 이상),
+# 모바일형은 세로 ≤2100(글자가 커서 0.45배여도 읽힘, 폰에선 화면 폭을 꽉 채움). 긴 변 ≤ 2560이라 해상도도 안 깎인다.
+MAX_PART_PX = {"wide": 1600, "mobile": 2100}
+
+def _chunk_name(g):
+    """여러 장에 걸친 ETF 조각이면 이름 뒤에 (i/n)."""
+    c = g.get("chunk")
+    return f"{g['etf']} ({c[0]}/{c[1]})" if c else g["etf"]
+
+def _mobile_sections(g):
+    """모바일 표에서 그릴 섹션 (매수, 매도). 조각이 아니면 둘 다(빈 쪽은 '(없음)').
+    조각이면 행이 있는 섹션만 — 단 매수가 없는 ETF는 첫 조각에, 매도가 없는 ETF는 마지막 조각에 '(없음)'."""
+    c = g.get("chunk")
+    if not c:
+        return True, True
+    nb, ns = g.get("n_buy", len(g["buy"])), g.get("n_sell", len(g["sell"]))
+    return bool(g["buy"]) or (nb == 0 and c[0] == 1), bool(g["sell"]) or (ns == 0 and c[0] == c[1])
 
 def _est_px_wide(gs):
     """render_report_image 의 ETF 표 높이(px) 추정: (행수+1.6)×0.6in × 170dpi."""
@@ -1337,11 +1360,41 @@ def _est_px_mobile(gs):
     """render_report_image_mobile 의 표 높이(px) 추정: 행 단위(HU) × 0.235in × 205dpi."""
     u = 0.0
     for i, g in enumerate(gs):
-        u += (1.4 if i else 0) + 1.25 + 1.0 + 1.75 * max(1, len(g["buy"])) + 1.0 + 1.75 * max(1, len(g["sell"]))
+        sb, ss = _mobile_sections(g)
+        u += (1.4 if i else 0) + 1.25 + ((1.0 + 1.75 * max(1, len(g["buy"]))) if sb else 0) \
+             + ((1.0 + 1.75 * max(1, len(g["sell"]))) if ss else 0)
     return u * 0.235 * 205
 
-def _split_caps(caps, est, base_px, max_px=MAX_PART_PX):
-    """장 수는 최소로, 장마다 높이는 고르게. 다음 ETF를 넣으면 목표 높이를 절반 넘게 넘길 때 새 장을 시작한다."""
+def _chunk_oversized(caps, kind, est, base_px, max_px):
+    """한 장 상한보다 큰 ETF를 행 단위로 고르게 쪼갠 조각들로 바꾼다(나머지는 그대로)."""
+    out = []
+    for g in caps:
+        if base_px + est([g]) <= max_px:
+            out.append(g); continue
+        buy, sell = g["buy"], g["sell"]
+        if kind == "wide":      # 매수·매도가 좌우로 나란히 → 같은 행 범위로 자른다
+            n = max(len(buy), len(sell))
+            per = max(1, int((max_px - base_px) / (0.6 * 170) - 1.6))
+            c = -(-n // per); size = -(-n // c)
+            pieces = [(buy[i * size:(i + 1) * size], sell[i * size:(i + 1) * size]) for i in range(c)]
+        else:                   # 매수 뒤에 매도가 이어지는 세로 표 → 이어 붙인 행 목록을 자른다
+            seq = [("b", r) for r in buy] + [("s", r) for r in sell]
+            per = max(1, int(((max_px - base_px) / (0.235 * 205) - 1.25 - 2.0) / 1.75))
+            c = -(-len(seq) // per); size = -(-len(seq) // c)
+            pieces = []
+            for i in range(c):
+                seg = seq[i * size:(i + 1) * size]
+                pieces.append(([r for t, r in seg if t == "b"], [r for t, r in seg if t == "s"]))
+        seen_b = seen_s = 0
+        for i, (b, s) in enumerate(pieces, 1):
+            out.append(dict(g, buy=b, sell=s, n_buy=len(buy), n_sell=len(sell), chunk=(i, len(pieces)),
+                            cont_buy=bool(b) and seen_b > 0, cont_sell=bool(s) and seen_s > 0))
+            seen_b += len(b); seen_s += len(s)
+    return out
+
+def _split_caps(caps, est, base_px, max_px):
+    """장 수는 최소로, 장마다 높이는 고르게. 다음 ETF를 넣으면 목표 높이를 절반 넘게 넘길 때 새 장을 시작한다.
+    상한을 넘는 장은 ETF 하나짜리일 때만 허용(한 ETF는 쪼개지 않으므로)."""
     if base_px + est(caps) <= max_px or len(caps) < 2:
         return [caps]
     k = 2
@@ -1353,7 +1406,7 @@ def _split_caps(caps, est, base_px, max_px=MAX_PART_PX):
                 parts.append(cur); cur = []
             cur.append(g)
         parts.append(cur)
-        if all(base_px + est(p) <= max_px for p in parts) or k >= len(caps):
+        if all(base_px + est(p) <= max_px or len(p) == 1 for p in parts) or k >= len(caps):
             return parts
         k += 1
 
@@ -1366,7 +1419,8 @@ def render_report_parts(kind, groups, today, prev, status_line=""):
         render, est, base, stem = render_report_image, _est_px_wide, 330, "pdf_change"
     else:
         render, est, base, stem = render_report_image_mobile, _est_px_mobile, 330, "pdf_change_m"
-    parts = _split_caps(caps, est, base)
+    pieces = _chunk_oversized(caps, kind, est, base, MAX_PART_PX[kind])
+    parts = _split_caps(pieces, est, base, MAX_PART_PX[kind])
     if len(parts) == 1:
         return [render(groups, today, prev, status_line)]
     ymd = today.strftime("%Y%m%d")
