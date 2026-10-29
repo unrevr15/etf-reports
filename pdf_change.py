@@ -252,7 +252,7 @@ def _rise_direct(stid, ymd):
 #     '최신 바스켓'을 주면서 요청 날짜를 그대로 echo한다. 그대로 믿으면 묵은 바스켓이
 #     오늘치로 저장된다(켐트로닉스 오보와 같은 유형). → 전영업일 응답과 본문이 완전히 같으면
 #     clamp로 보고 빈값을 반환해 '대기'로 넘긴다. 종가가 매일 다르므로 본문 동일 = 같은 파일이다.
-_TIGER_KRX = {"KR70168K0008": "0168K0", "KR70204S0006": "0204S0"}   # ISIN → KRX 단축코드(WiseReport 폴백용)
+_TIGER_KRX = {"KR70168K0008": "0168K0", "KR70204S0006": "0204S0", "KR7471780007": "471780"}   # ISIN → KRX 단축코드(WiseReport 폴백용)
 
 def _tiger_rows(text):
     """pdfListAjax 응답(<tr> 조각) → [[셀,...], ...]. 표가 아니면 [] (pandas·lxml 불필요)."""
@@ -318,6 +318,9 @@ def _tiger_wisereport(krx):
         return [], ""
 
 def fetch_tiger(isin, ymd):
+    # 휴장일 요청은 거부: 미래에셋은 주말 fixDate에 다음 영업일 파일을 주는데 clamp 검사(전영업일과 비교)가 못 잡아
+    # 요청한 휴장일을 그대로 기준일로 반환했다(2026-10-29 검증에서 발견, 정규 실행은 영업일만 요청해 영향 없음).
+    if not is_trading_day(datetime.strptime(ymd, "%Y%m%d").date()): return {}, ""
     txt = _tiger_raw(isin, ymd)
     if txt:
         # clamp 탐지: 전영업일 응답과 본문이 똑같으면 아직 당일분이 안 나온 것
@@ -328,6 +331,7 @@ def fetch_tiger(isin, ymd):
                 txt = ""
         except Exception:
             pass
+    if txt: _CASH_CACHE.pop((isin, ymd), None)   # 재조회(대기 폴링) 시 현금 누적 방지
     out = {}
     for c in _tiger_rows(txt) if txt else []:
         nm = c[1]                               # 0=종목코드 1=종목명 2=수량 3=평가금액 4=비중
@@ -335,7 +339,7 @@ def fetch_tiger(isin, ymd):
         try: ev = float(c[3].replace(",", ""))
         except (ValueError, TypeError): ev = 0.0
         if any(sk in nm for sk in SKIP):
-            _note_cash(isin, ymd, nm, ev); continue
+            _note_cash(isin, ymd, nm, ev); continue   # 직접 경로의 ymd = 실제 기준일(위 clamp·휴장일 검사 통과)
         try: q = float(c[2].replace(",", ""))
         except (ValueError, TypeError): continue
         if nm in out: out[nm][0] += q
@@ -422,7 +426,7 @@ def krx_isin(code):
 # 단 당일분 갱신이 07:20~08:37 사이라 아침 발송 시각엔 전날 PDF다 → lag ETF의 전일분 소스로 쓴다(WiseReport보다 안정,
 # 종목별 평가금액·원화현금 포함). 최신분만 주므로 ymd는 받지 않고 실제 기준일(etfPdfYmd)을 반환한다.
 _FUNETF_DOWN = False
-_FUNETF_ALIAS = {"네이버": "NAVER"}   # FunETF만 한글로 쓰는 종목명 → KRX·운용사 표기(2026-10-29 DAISHIN 대조에서 발견)
+_FUNETF_ALIAS = {"네이버": "NAVER", "LG씨앤에스": "LG씨엔에스"}   # FunETF만 한글로 쓰는 종목명 → KRX·운용사 표기(2026-10-29 DAISHIN 대조에서 발견)
 
 def fetch_funetf(isin, key=None):
     """FunETF 상품 페이지 → ({종목: [1CU수량, 단가]}, PDF기준일). 원화현금 행은 key(기본 isin)의 1CU 현금으로 기록."""
@@ -725,6 +729,39 @@ def fetch_ace(fund_cd, ymd):
         except Exception: pass
     return (out, actual) if out else ({}, "")
 
+# ── fetcher: 신한(SOL) soletf.co.kr /api/fund/pdfList (work_dt 날짜 파라미터) → {종목:[1CU수량, 단가]}, 기준일 ──
+#   fund_cd = 신한 내부 펀드코드(444200 → 210940; /api/etf/pds/search?keyword= 로 조회). PRICE = 1CU 평가금액(원).
+#   미게시·휴일·미래 날짜는 [] 를 준다(echo 없음). 행마다 WORK_DT 가 실려 있어 그것을 실제 기준일로 쓴다.
+#   현금성자산(STOCK_CODE KRD010010001) 행 → 1CU 현금.
+def fetch_sol(fund_cd, ymd):
+    r = requests.get("https://www.soletf.co.kr/api/fund/pdfList",
+                     params={"fund_cd": fund_cd, "work_dt": ymd},
+                     headers={"User-Agent": UA, "Accept": "application/json",
+                              "Referer": f"https://www.soletf.co.kr/ko/fund/etf/{fund_cd}?tabIndex=3"},
+                     timeout=(5, 20))
+    try: rows = r.json()
+    except ValueError: return {}, ""
+    if not isinstance(rows, list) or not rows: return {}, ""
+    actual = str(rows[0].get("WORK_DT") or "").strip()
+    if not actual or any(str(it.get("WORK_DT") or "").strip() != actual for it in rows):
+        return {}, ""
+    _CASH_CACHE.pop((fund_cd, actual), None)   # 재조회 시 현금 누적 방지(실제 기준일 키)
+    out = {}
+    for it in rows:
+        nm = str(it.get("SEC_NM") or "").strip()
+        if not nm: continue
+        try: ev = float(it.get("PRICE") or 0)
+        except (ValueError, TypeError): ev = 0.0
+        cd = str(it.get("STOCK_CODE") or "")
+        if any(s in nm for s in SKIP) or cd.startswith("KRD"):
+            _note_cash(fund_cd, actual, nm, ev); continue
+        try: q = float(it.get("QTY") or 0)
+        except (ValueError, TypeError): continue
+        if q <= 0: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if ev else None)]
+    return (out, actual) if out else ({}, "")
+
 # ── 발송 그룹 ─────────────────────────────────────────────────
 # 2026-10-29 사용자 요청: 아침 리포트를 4개로 나눠 각각 보낸다(채널마다 그룹별 사진 1장씩, 길면 그 그룹만 앨범).
 # ETFS 의 "grp" 로 소속을 정한다. 그룹마다 따로 완결 판정·발송하므로 한 그룹이 늦어도 다른 그룹은 먼저 나간다.
@@ -766,15 +803,19 @@ ETFS = [
     # 2026-10-29 추가 — 반도체(국내 6종, KoAct 반도체&2차전지 혼합형 제외)·ESS·2차전지(국내 3종). 순서 = 그룹 안 표시 순서(순자산 큰 순).
     #   CU는 KRX 실좌수(순자산/NAV) 정수배 + (1CU 평가합+현금)/NAV 로 확인. 운용사 직접 소스는 당일분 → lag 아님(늦으면 그 그룹만 08:40까지 대기).
     #   RISE(kbam)는 클라우드에서 접속 불가 → FunETF 전일분이라 lag. DS는 기존 DS 코스닥과 같은 이유로 lag.
+    {"name":"SOL 코리아메가테크액티브","grp":"semi","am":"신한","mode":"dateapi","fetch":fetch_sol,"id":"210940","krx":"444200","cu":50000},   # 2026-10-29 추가(이름에 반도체 없지만 삼성·하이닉스 중심 국내 100%)
     {"name":"WON 반도체밸류체인액티브","grp":"semi","am":"우리","mode":"dateapi","fetch":fetch_won,"id":"ETF9","krx":"474590","cu":50000},
+    {"name":"TIGER 코리아테크액티브","grp":"semi","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR7471780007","krx":"471780","cu":10000,"lag":True},
     {"name":"RISE 비메모리반도체액티브","grp":"semi","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44B9","krx":"388420","cu":20000,"lag":True},
     {"name":"DAISHIN AI반도체&인프라액티브","grp":"semi","am":"대신","mode":"dateapi","fetch":fetch_daishin,"id":"AI반도체","krx":"486240","cu":100000},
+    {"name":"KoAct AI인프라액티브","grp":"semi","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFN8","krx":"487130","cu":50000},
     {"name":"PLUS AI반도체소부장액티브","grp":"semi","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006410","krx":"0239Z0","cu":50000},
     {"name":"RISE 반도체소부장액티브","grp":"semi","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44L2","krx":"0254H0","cu":50000,"lag":True},
     {"name":"DS AI반도체액티브","grp":"semi","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0243M0","krx":"0243M0","cu":50000,"lag":True},
     {"name":"RISE 2차전지액티브","grp":"ess","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44C7","krx":"422420","cu":20000,"lag":True},
     {"name":"KoAct 수소전력ESS인프라액티브","grp":"ess","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFT9","krx":"0150K0","cu":50000},
     {"name":"ACE 2차전지&친환경차액티브","grp":"ess","am":"한국투자","mode":"dateapi","fetch":fetch_ace,"id":"K55101DH7878","krx":"385600","cu":100000},
+    {"name":"KoAct 반도체&2차전지핵심소재액티브","grp":"ess","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFM8","krx":"482030","cu":50000},
     {"name":"MIDAS 코스닥액티브","grp":"kosdaq","am":"마이다스","mode":"dateapi","fetch":fetch_mirror,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
     #   fetch_unicorn·fetch_db 함수는 코드에 유지 → 재추가 가능.
