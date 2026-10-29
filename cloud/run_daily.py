@@ -91,7 +91,7 @@ def publish_marker(name):
     log(f"  [마커] 레포에 바로 기록 {'완료' if st in (200, 201) else f'실패(HTTP {st}) — 잡 끝 커밋에서 다시 올림'}")
 
 DEGRADE_AFTER = 3   # 연속 이 거래일 수만큼 결측이면 '장기 파손'으로 보고 완결 판정에서 뺀다
-MAX_DEGRADED = 2    # 이보다 많이 깨졌으면 자동 제외하지 않는다(껍데기 리포트가 나가는 것 방지)
+MAX_DEGRADED = 3    # 이보다 많이 깨졌으면 자동 제외하지 않는다(껍데기 리포트가 나가는 것 방지)
 
 def degraded_set(ctx):
     """직전 DEGRADE_AFTER 거래일 내내 유효 캡처가 없는 ETF 이름 집합.
@@ -125,11 +125,12 @@ def _push_dash(ctx, today):
     except Exception as e:
         log(f"  대시보드 업로드 건너뜀: {e}")
 
-def _send_state(ctx):
-    """지금 시각 기준 발송 판정 상태."""
+def _send_state(ctx, grp=None):
+    """지금 시각 기준 발송 판정 상태. grp 를 주면 그 발송 그룹 ETF만 완결을 본다."""
     now_t = datetime.datetime.now().time()            # TZ=Asia/Seoul (워크플로 env)
     deg = degraded_set(ctx)                           # 장기 파손 ETF → 완결 판정에서 자동 제외
-    pend_raw = [g["etf"] for g in ctx["groups"] if g["state"] == "pending" and g["etf"] not in LATE]
+    gs = [g for g in ctx["groups"] if grp is None or g.get("grp") == grp]
+    pend_raw = [g["etf"] for g in gs if g["state"] == "pending" and g["etf"] not in LATE]
     pend = [n for n in pend_raw if n not in deg]
     krx_ok = ctx.get("krx_ok", True)                  # KRX 실패면 금액·순자산·현금 통째 빈칸 → 보류
     return {"earliest": now_t >= SEND_OPEN,
@@ -143,36 +144,109 @@ def _send_state(ctx):
 def _can_send(st):
     return st["earliest"] and (not st["hard_stop"]) and (st["complete"] or st["deadline"])
 
-def wait_until_sendable(ctx, today):
-    """크론 회차를 기다리지 말고 '잡 안에서' 기다린다.
+# ── 그룹별 발송 ────────────────────────────────────────────────
+# 2026-10-29부터 리포트를 발송 그룹(P.REPORT_GROUPS: 코스닥·반도체·바이오·ESS)마다 따로 보낸다.
+# 마커도 채널×그룹: reports/.tg_sent_{ymd}_{grp}(채널1), .tg_sent2_{ymd}_{grp}(채널2).
+# 그룹 도입 전 마커(.tg_sent_{ymd})가 있으면 그 채널은 그날 이미 전부 보낸 것으로 본다(배포 당일 재발송 방지).
+CHANNELS = (("채널1", "wide", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", ".tg_sent"),     # @pefscreener 색상·가로
+            ("채널2", "mobile", "TELEGRAM_TOKEN2", "TELEGRAM_CHAT_ID2", ".tg_sent2"))  # 수급방 무채색·모바일
 
-    2026-08-27부터 GitHub 스케줄러가 열화됐다 — 예정 12회/일 중 5~6회만 뜨고
-    중앙 148분 늦으며, 분 단위 크론 6개는 20거래일 연속 0회 실행됐다.
-    그래서 08:40 마감 직후 회차가 없어(공백 중앙 62분) 한 ETF라도 대기면
-    발송이 09시대로 밀렸다. 크론을 더 까는 것은 무효이므로(이미 깐 것이 안 뜸)
-    같은 잡 안에서 재수집하며 조건이 서는 즉시 보낸다.
+def _mk(prefix, ymd, grp=None):
+    return os.path.join(APP, "reports", f"{prefix}_{ymd}" + (f"_{grp}" if grp else ""))
+
+def _sent(prefix, ymd, grp):
+    return sync_marker(_mk(prefix, ymd)) or sync_marker(_mk(prefix, ymd, grp))
+
+_GAVE_UP = set()   # 이번 잡에서 MAX_SEND_FAIL번 실패한 (채널, 그룹) — 대기 루프가 그 방 때문에 마감까지 돌지 않게(다음 회차가 재시도)
+MAX_SEND_FAIL = 2
+_FAILS = {}
+
+def _configured(ch):
+    c = next(x for x in CHANNELS if x[0] == ch)
+    return bool(os.getenv(c[2]) and os.getenv(c[3]))
+
+def _group_done(ymd, grp):
+    """그룹이 이번 잡에서 더 할 일 없음 = 설정된 채널마다 보냈거나(마커) 이번 잡에서 포기."""
+    return all(_sent(c[4], ymd, grp) or not _configured(c[0]) or (c[0], grp) in _GAVE_UP for c in CHANNELS)
+
+def _group_payload(ctx, grp):
+    label = P.REPORT_LABEL[grp]
+    gs = [g for g in ctx["groups"] if g.get("grp") == grp]
+    status = P.group_status_line(gs)
+    cap = f"{label} ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{status}"
+    return label, gs, status, cap
+
+def send_group(ctx, grp, dm=None):
+    """한 그룹을 두 채널로 보낸다. 변화가 하나도 없으면 사진 대신 짧은 텍스트.
+    dm=(토큰, chat) 이면 점검용: 두 형식을 그 DM으로만, 마커 없음."""
+    label, gs, status, cap = _group_payload(ctx, grp)
+    ymd = ctx["today"].strftime("%Y%m%d")
+    for ch, kind, tok_env, chat_env, prefix in CHANNELS:
+        try:
+            tok, chat = (dm if dm else (os.getenv(tok_env), os.getenv(chat_env)))
+            if not (tok and chat): log(f"  [{ch}·{label}] 대상 미설정 — 스킵"); continue
+            if not dm and _sent(prefix, ymd, grp): log(f"  [{ch}·{label}] 오늘 이미 발송 — 스킵"); continue
+            pngs = P.render_report_parts(kind, gs, ctx["today"], ctx["prev"], status, label=label, tag=grp)
+            if not pngs and not dm and not _send_state(ctx, grp)["complete"]:
+                # 그림이 없는 이유가 '변화 없음'이 아니라 '아직 안 들어옴'(마감 시점 대기 ETF)이면 확정 불가 →
+                # '변화 없음'을 보내거나 마커를 남기지 않는다. 데이터가 오면 다음 회차(15:00 전)가 제대로 보낸다.
+                log(f"  [{ch}·{label}] 그릴 변화 없음이나 대기 ETF 있음({', '.join(_send_state(ctx, grp)['pend'])}) — 마커 없이 스킵")
+                continue
+            c = (f"[DM 점검 · {ch} 형식]\n" if dm else "") + cap
+            ok = (P.send_telegram(pngs, c, token=tok, chat=chat) if pngs
+                  else P.send_text(c + "\n(오늘 구성 변화 없음)", token=tok, chat=chat))
+            log(f"  [{ch}·{label}] {'사진 %d장' % len(pngs) if pngs else '텍스트(변화 없음)'} → {'완료' if ok else '실패'}")
+            if not ok and not dm:
+                _FAILS[(ch, grp)] = _FAILS.get((ch, grp), 0) + 1
+                if _FAILS[(ch, grp)] >= MAX_SEND_FAIL:
+                    _GAVE_UP.add((ch, grp)); log(f"  [{ch}·{label}] {MAX_SEND_FAIL}회 실패 — 이번 잡에선 포기(다음 회차 재시도)")
+            if ok and not dm:
+                m = _mk(prefix, ymd, grp)
+                os.makedirs(os.path.dirname(m), exist_ok=True)
+                with open(m, "w") as f: f.write(MARK)
+                publish_marker(os.path.basename(m))
+        except Exception as e:
+            log(f"  [{ch}·{label}] 실패: {type(e).__name__}: {e}")
+
+def wait_and_send(ctx, today):
+    """크론 회차를 기다리지 말고 '잡 안에서' 기다리며, 그룹마다 완결되는 즉시 보낸다.
+
+    2026-08-27부터 GitHub 스케줄러가 열화됐다 — 예정 회차가 수 시간 늦거나 안 뜬다.
+    그래서 같은 잡 안에서 재수집하며 조건이 서는 그룹부터 바로 보낸다(08:40 마감이면 남은 그룹을 되는대로).
     재수집은 증분이라 이미 캡처된 ETF는 다시 받지 않는다(대기 중인 것만 재시도)."""
     import time
+    ymd = today.strftime("%Y%m%d")
+    keys = [k for k, _ in P.REPORT_GROUPS]
     t0 = datetime.datetime.now()
     while True:
-        st = _send_state(ctx)
-        if _can_send(st) or st["hard_stop"]:
-            return ctx, st
+        todo = [k for k in keys if not _group_done(ymd, k)]
+        for k in todo:
+            st = _send_state(ctx, k)
+            if _can_send(st):
+                if st["deg_hit"]:
+                    log(f"  [열화] 연속 {DEGRADE_AFTER}거래일 결측 → 완결 판정 제외: {', '.join(sorted(st['deg_hit']))}")
+                send_group(ctx, k)
+        todo = [k for k in todo if not _group_done(ymd, k)]
+        if not todo:
+            return ctx
         now = datetime.datetime.now()
+        st_all = _send_state(ctx)
+        if st_all["hard_stop"]:
+            log(f"  발송 금지 — {SEND_HARD:%H:%M} 넘음(아침 리포트 아님). 미발송: {', '.join(todo)}"); return ctx
         if now.time() < WAIT_FLOOR:
-            log(f"  [대기] {WAIT_FLOOR:%H:%M} 이전 회차 — 기다리지 않음")
-            return ctx, st
+            log(f"  [대기] {WAIT_FLOOR:%H:%M} 이전 회차 — 기다리지 않음"); return ctx
         spent = (now - t0).total_seconds() / 60.0
         if spent >= WAIT_MAX_MIN:
-            log(f"  [대기] 상한 {WAIT_MAX_MIN}분 도달 — 이번 회차는 발송 없이 종료")
-            return ctx, st
-        if not st["earliest"]:                        # 아직 발송창 전 → 07:10까지 한 번에 잔다
-            tgt = datetime.datetime.combine(now.date(), SEND_OPEN)
-            nap = (tgt - now).total_seconds() + 20
+            log(f"  [대기] 상한 {WAIT_MAX_MIN}분 도달 — 미발송 그룹: {', '.join(todo)}"); return ctx
+        if st_all["deadline"] and all(_can_send(_send_state(ctx, k)) for k in todo):
+            log(f"  [대기] 마감 후에도 미발송(대상 미설정·전송 실패): {', '.join(todo)}"); return ctx
+        if not st_all["earliest"]:                    # 아직 발송창 전 → 07:10까지 한 번에 잔다
+            nap = (datetime.datetime.combine(now.date(), SEND_OPEN) - now).total_seconds() + 20
             why = f"발송창 {SEND_OPEN:%H:%M} 대기"
-        else:                                         # 발송창 안이지만 미완결 → 마감까지 폴링
+        else:
             nap = POLL_SEC
-            why = "미완결 " + (", ".join(n.split()[0] for n in st["pend"]) or "KRX(금액)")
+            why = " / ".join(f"{P.REPORT_LABEL[k]}: " + (", ".join(n.split()[0] for n in _send_state(ctx, k)["pend"]) or "KRX(금액)")
+                             for k in todo)
         nap = max(30.0, min(nap, (WAIT_MAX_MIN - spent) * 60.0))
         log(f"  [대기] {why} — {nap/60:.0f}분 후 재수집 (누적 {spent:.0f}분, 상한 {WAIT_MAX_MIN})")
         time.sleep(nap)
@@ -197,56 +271,28 @@ def main():
     #  같은 날 다시 실행되면 덮어쓴다)
     _push_dash(ctx, today)
 
-    log("1-b) 이미지 렌더 + 채널 전송 (아침 7:10~8:40, 완결되면 즉시·마감시 되는대로, 하루 1회)")
+    log("1-b) 그룹별 이미지 렌더 + 채널 전송 (아침 7:10~8:40, 그룹마다 완결되면 즉시·마감시 되는대로, 하루 1회)")
     send_win = os.getenv("TELEGRAM_SEND", "").lower() in ("1", "true", "yes")   # 발송 후보 실행인가
-    done_mk = [os.path.join(APP, "reports", f".tg_sent_{ymd}"),
-               os.path.join(APP, "reports", f".tg_sent2_{ymd}")]
-    already = all([sync_marker(m) for m in done_mk])     # 오늘 이미 다 보냈으면(원격 포함) 기다릴 이유 없다
-    if send_win and not already:
-        ctx, st = wait_until_sendable(ctx, today)       # ★ 크론 사이가 아니라 잡 안에서 대기
-        _push_dash(ctx, today)                          # 대기 동안 채워진 것을 대시보드에 반영
-    else:
-        st = _send_state(ctx)
-    send = send_win and _can_send(st)
-    if st["deg_hit"]:
-        log(f"  [열화] 연속 {DEGRADE_AFTER}거래일 결측 → 완결 판정 제외: {', '.join(sorted(st['deg_hit']))}")
-    if send_win and st["hard_stop"]:
-        log(f"  발송 금지 — {SEND_HARD:%H:%M} 넘음(아침 리포트 아님). 파일만 갱신.")
-    elif send_win and not send:
-        why = list(dict.fromkeys([n.split()[0] for n in st["pend"]] + ([] if st["krx_ok"] else ["KRX(금액)"])))
-        log(f"  발송 보류 — {', '.join(why) or '발송 시각 아님'}")
-    cap = f"코스닥 액티브 ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{ctx['status_line']}"
-    def deliver(label, png, tok, chat, marker_name):
-        try:
-            if not png: log(f"  [{label}] 변화 없음 — 스킵"); return
-            if not (tok and chat): log(f"  [{label}] 대상 미설정 — 스킵"); return
-            if not send: log(f"  [{label}] 전송 시각 아님 — 렌더만"); return
-            m = os.path.join(APP, "reports", marker_name)
-            if sync_marker(m): log(f"  [{label}] 오늘 이미 발송 — 스킵"); return
-            if P.send_telegram(png, cap, token=tok, chat=chat):
-                os.makedirs(os.path.dirname(m), exist_ok=True)
-                with open(m, "w") as f: f.write(MARK)
-                log(f"  [{label}] 전송 완료 — 잠금 생성")
-                publish_marker(marker_name)
-        except Exception as e:
-            log(f"  [{label}] 실패: {type(e).__name__}: {e}")
-    # 길면 ETF 단위로 여러 장 → 앨범(2026-10-26 10종·94행 날 모바일 1장이 텔레그램 사진 한계를 넘어 파일로 나갔다)
-    pngs1 = P.render_report_parts("wide", ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])     # 채널1: 색상·가로
-    pngs2 = P.render_report_parts("mobile", ctx["groups"], ctx["today"], ctx["prev"], ctx["status_line"])   # 채널2: 무채색·모바일
     if os.getenv("DM_TEST", "").lower() == "true":
-        # 수동 점검 전용(workflow_dispatch dm_test): 두 형식을 사용자 DM(봇2)으로만 보낸다.
+        # 수동 점검 전용(workflow_dispatch dm_test): 4개 그룹 × 두 형식을 사용자 DM(봇2)으로만.
         # 방 발송·발송 마커 없음 — force_send 를 같이 켜도 방으로는 안 나간다.
-        dm, tok2 = os.getenv("TELEGRAM_DM_ID"), os.getenv("TELEGRAM_TOKEN2")
-        for label, pngs in (("채널1 형식", pngs1), ("채널2 형식", pngs2)):
-            if not (pngs and dm and tok2):
-                log(f"  [DM 점검] {label}: 보낼 것 없음 또는 DM 미설정 — 스킵"); continue
-            ok = P.send_telegram(pngs, f"[DM 점검 · {label} · {len(pngs)}장]\n{cap}", token=tok2, chat=dm)
-            log(f"  [DM 점검] {label} {len(pngs)}장 → {'완료' if ok else '실패'}")
+        dm = (os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_DM_ID"))
+        if all(dm):
+            for k, _ in P.REPORT_GROUPS: send_group(ctx, k, dm=dm)
+        else:
+            log("  [DM 점검] DM 미설정 — 스킵")
+    elif send_win:
+        if all(_group_done(ymd, k) for k, _ in P.REPORT_GROUPS):
+            log("  오늘 4개 그룹 모두 이미 발송")
+        else:
+            ctx = wait_and_send(ctx, today)               # ★ 크론 사이가 아니라 잡 안에서 대기, 그룹마다 즉시 발송
+            _push_dash(ctx, today)                        # 대기 동안 채워진 것을 대시보드에 반영
     else:
-        # 채널1: 기존(색상·가로) @pefscreener
-        deliver("채널1", pngs1, os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID"), f".tg_sent_{ymd}")
-        # 채널2: 신규(무채색·모바일 세로)
-        deliver("채널2", pngs2, os.getenv("TELEGRAM_TOKEN2"), os.getenv("TELEGRAM_CHAT_ID2"), f".tg_sent2_{ymd}")
+        for k, label in P.REPORT_GROUPS:                  # 무발송 회차: 렌더만(산출물 갱신)
+            _, gs, status, _ = _group_payload(ctx, k)
+            for _, kind, *_ in CHANNELS:
+                P.render_report_parts(kind, gs, ctx["today"], ctx["prev"], status, label=label, tag=k)
+        log("  전송 회차 아님 — 렌더만")
     # 주간 리포트 — 대기까지 끝난 뒤 한 번만(그 주 마지막 거래일에만)
     if P.is_last_trading_day_of_week(today):
         with guard(20):
