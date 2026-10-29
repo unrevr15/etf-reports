@@ -59,6 +59,8 @@ def fetch_samsungactive(prod_id, ymd):
                      headers={"User-Agent": UA, "Referer": f"https://www.samsungactive.co.kr/etf/view.do?id={prod_id}"},
                      timeout=20)
     d = r.json().get("pdf", {})
+    actual = str(d.get("gijunYMD", "")).replace(".", "")
+    _CASH_CACHE.pop((prod_id, actual), None)   # 현금은 요청일이 아니라 실제 기준일로(재조회 시 누적 방지)
     out = {}
     for it in d.get("list", []):
         nm = (it.get("secNm") or "").strip()
@@ -66,12 +68,12 @@ def fetch_samsungactive(prod_id, ymd):
         try: ev = float(str(it.get("evalA", "0")).replace(",", ""))
         except ValueError: ev = 0.0
         if any(s in nm for s in SKIP):
-            _note_cash(prod_id, ymd, nm, ev); continue
+            _note_cash(prod_id, actual, nm, ev); continue
         try: q = float(str(it.get("applyQ", "0")).replace(",", ""))
         except ValueError: continue
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, (ev / q if q else None)]
-    return out, str(d.get("gijunYMD", "")).replace(".", "")
+    return out, actual
 
 # ── fetcher: 타임폴리오(TIME) pdf_excel.php (pdfDate 날짜 파라미터) → {종목:수량}, 기준일 ──
 def fetch_time(idx, ymd):
@@ -118,6 +120,7 @@ def fetch_plus(n, ymd):
         content = r.json().get("content") or []
     except Exception:
         return {}, ""
+    cash = []; ratio = {}
     for it in content:
         nm = str(it.get("jmNm") or "").strip()
         if not nm: continue
@@ -125,9 +128,25 @@ def fetch_plus(n, ymd):
         try: q = float(it.get("amount") or 0)
         except (ValueError, TypeError): continue
         if any(s in nm for s in SKIP):
-            _note_cash(n, ymd, nm, q); continue   # 현금라인 amount = 현금액(원)/CU
+            cash.append((nm, q)); continue   # 현금라인 amount = 현금액(원)/CU — 실제 기준일(wkdate)로 아래에서 기록
         if nm in out: out[nm][0] += q
         else: out[nm] = [q, None]   # PLUS는 평가금액 없음 → 종가 미상(KRX fallback)
+        try: ratio[nm] = ratio.get(nm, 0.0) + float(it.get("ratio") or 0)
+        except (ValueError, TypeError): pass
+    # 코스닥이 아닌 종목(코스피)은 KRX 종가가 없어 금액·비중이 빈다(2026-10-29 PLUS AI반도체소부장 4/22종목).
+    # PLUS는 종목별 비중(ratio, 소수 4자리)을 준다 → 종가를 아는 코스닥 종목으로 바스켓 총액을 구하고
+    # 단가 = 비중 × 총액 ÷ 수량 으로 역산한다(코스닥 종목 검증 오차 0.002%). 네이버 종가는 NXT 시간외가 섞여 0.2~1.3% 어긋나 못 쓴다.
+    if out and actual:
+        kq = krx_kosdaq_prices()
+        known = [(nm, v[0] * kq[nm]) for nm, v in out.items() if kq.get(nm) and ratio.get(nm)]
+        rk = sum(ratio[nm] for nm, _ in known)
+        if known and rk > 0:
+            total = sum(ev for _, ev in known) / (rk / 100)
+            for nm, v in out.items():
+                if v[1] is None and nm not in kq and ratio.get(nm) and v[0]:
+                    v[1] = round(ratio[nm] / 100 * total / v[0])
+    _CASH_CACHE.pop((n, actual), None)
+    for nm, q in cash: _note_cash(n, actual, nm, q)
     return out, actual
 
 # ── fetcher: KB(RISE) 1CU 구성종목 ──────────────────────────────
@@ -151,7 +170,7 @@ def fetch_plus(n, ymd):
 #         첫 접속 실패에서 이번 실행 동안은 건너뛰고(같은 결과에 회차마다 4분씩 쓰던 것) FunETF → WiseReport로 받는다.
 #         둘 다 최신분만 주므로 아침엔 전일분 → ETFS에서 "lag":True.
 _KBAM_DOWN = False
-_RISE_KRX = {"44I0": "0000Z0"}   # stid → KRX 단축코드(FunETF·WiseReport 폴백용)
+_RISE_KRX = {"44I0": "0000Z0", "44B9": "388420", "44L2": "0254H0", "44C7": "422420"}   # stid → KRX 단축코드(FunETF·WiseReport 폴백용)
 
 def fetch_rise(stid, ymd):
     global _KBAM_DOWN
@@ -184,6 +203,7 @@ def _rise_direct(stid, ymd):
     except Exception:
         return {}, ""
     actual = str(j.get("base_dt") or "").strip()   # 실제 기준일(폴백 감지용)
+    _CASH_CACHE.pop((stid, actual), None)           # 같은 날짜 재조회(대기 폴링) 시 현금 누적 방지
     items = j.get("items") or []
     if not actual or not items:
         return {}, ""
@@ -212,7 +232,7 @@ def _rise_direct(stid, ymd):
         try: ev = float(str(ev).replace(",", "")) if ev is not None else 0.0
         except (ValueError, TypeError): ev = 0.0
         if any(s in nm for s in SKIP):
-            _note_cash(stid, ymd, nm, ev); continue     # 원화예금 등 → 현금 캐시
+            _note_cash(stid, actual, nm, ev); continue  # 원화예금 등 → 현금 캐시(요청일이 아니라 실제 기준일로)
         try: q = float(str(q).replace(",", ""))
         except (ValueError, TypeError): continue
         if not q: continue
@@ -402,6 +422,7 @@ def krx_isin(code):
 # 단 당일분 갱신이 07:20~08:37 사이라 아침 발송 시각엔 전날 PDF다 → lag ETF의 전일분 소스로 쓴다(WiseReport보다 안정,
 # 종목별 평가금액·원화현금 포함). 최신분만 주므로 ymd는 받지 않고 실제 기준일(etfPdfYmd)을 반환한다.
 _FUNETF_DOWN = False
+_FUNETF_ALIAS = {"네이버": "NAVER"}   # FunETF만 한글로 쓰는 종목명 → KRX·운용사 표기(2026-10-29 DAISHIN 대조에서 발견)
 
 def fetch_funetf(isin, key=None):
     """FunETF 상품 페이지 → ({종목: [1CU수량, 단가]}, PDF기준일). 원화현금 행은 key(기본 isin)의 1CU 현금으로 기록."""
@@ -409,9 +430,14 @@ def fetch_funetf(isin, key=None):
     import re
     if _FUNETF_DOWN: return {}, ""
     try:
-        r = requests.get(f"https://www.funetf.co.kr/product/etf/view/{isin}",
-                         headers={"User-Agent": UA, "Accept-Language": "ko-KR"}, timeout=(5, 25))
-    except requests.exceptions.ConnectionError as ex:      # ConnectTimeout 포함 — 이번 실행 동안은 같은 결과
+        for i in range(2):   # 429(요청 과다)면 잠깐 쉬고 한 번 더 — 회차당 FunETF 호출이 10건 안팎으로 늘었다
+            r = requests.get(f"https://www.funetf.co.kr/product/etf/view/{isin}",
+                             headers={"User-Agent": UA, "Accept-Language": "ko-KR"}, timeout=(5, 25))
+            if r.status_code != 429 or i: break
+            import time
+            ra = str(r.headers.get("Retry-After") or "5")
+            time.sleep(min(15, int(ra) if ra.isdigit() else 5))
+    except requests.exceptions.RequestException as ex:     # 접속·응답 시간초과 등 — 이번 실행 동안은 건너뛰고 WiseReport로
         _FUNETF_DOWN = True
         print(f"  [FunETF] 접속 실패({type(ex).__name__}) → 이번 실행에선 건너뜀", flush=True)
         return {}, ""
@@ -427,6 +453,8 @@ def fetch_funetf(isin, key=None):
     out = {}
     for it in rows:
         nm = str(it.get("citmNm") or "").strip()
+        if "/" in nm: nm = nm.split("/")[0].strip()   # 'POSCO홀딩스/포스코홀딩스' → 운용사 원본 표기(소스 전환 시 가짜 편출·편입 방지)
+        nm = _FUNETF_ALIAS.get(nm, nm)
         if not nm: continue
         try: q = float(it.get("icuStkc") or 0); ev = float(it.get("evAmt") or 0)
         except (ValueError, TypeError): continue
@@ -518,23 +546,236 @@ def fetch_ds(code, ymd):
     d, items = cands[0]
     return (_ds_map(items, code, d), d) if items else ({}, "")
 
+
+# ════ 2026-10-29 추가: 반도체·ESS 그룹 운용사 (출처 탐색·독립 검증: 날짜 정직성·CU·FunETF 대조) ════
+# ── fetcher: 우리자산운용(WON) wooriam.kr — 날짜 지정 PDF ──
+#   GetPDFListAJX(POST, CSRF 필요)는 상위 10종목만 주지만 행마다 LAST_DATE(실제 기준일)가 있다 → 기준일 확인용.
+#   ExcelDownload/PDFofETF(GET)는 전체 바스켓+원화예금(KRD010010001) 행. 날짜 컬럼이 없고 파일명은 요청일 에코.
+#   없는 날(미래·휴장일)은 둘 다 빈값(clamp 아님, 2026-10-29 실측: 10-30/10-31/10-09/10-05 → 0행).
+#   id = 사이트 fundCode (474590 → 'ETF9'), 상세페이지 uid는 _WON_UID에.
+_WON_UID = {"ETF9": "ts8ym1V3HHeDnN9S"}
+
+def fetch_won(fund_code, ymd):
+    import re, io
+    import pandas as pd
+    g = f"{ymd[:4]}.{ymd[4:6]}.{ymd[6:]}"
+    s = requests.Session(); s.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR"})
+    view = f"https://www.wooriam.kr/investment/etf-view/{_WON_UID.get(fund_code, '')}"
+    r = s.get(view, timeout=(5, 20))
+    m = re.search(r'name="csrf-token"\s+content="([^"]+)"', r.text)
+    if not m: return {}, ""
+    a = s.post("https://www.wooriam.kr/investment/GetPDFListAJX",
+               files={"fundCode": (None, fund_code), "pdfSearchDate": (None, g)},
+               headers={"X-CSRF-TOKEN": m.group(1), "Referer": view, "X-Requested-With": "XMLHttpRequest"},
+               timeout=(5, 20))
+    try: top = (a.json().get("data") or {}).get("PDFList") or []
+    except ValueError: return {}, ""
+    dates = {str(it.get("LAST_DATE") or "").replace(".", "") for it in top}
+    if len(dates) != 1: return {}, ""
+    actual = dates.pop()
+    if not re.fullmatch(r"\d{8}", actual): return {}, ""
+    ag = f"{actual[:4]}.{actual[4:6]}.{actual[6:]}"
+    x = s.get("https://www.wooriam.kr/ExcelDownload/PDFofETF",
+              params={"fundCode": fund_code, "pdfSearchDate": ag}, headers={"Referer": view}, timeout=(5, 30))
+    try: df = pd.read_excel(io.BytesIO(x.content), dtype=str)   # [번호,종목코드,종목명,수량(주)/액면(원),평가금액(원),비중(%)]
+    except Exception: return {}, ""
+    try:
+        c_cd = next(c for c in df.columns if "코드" in str(c)); c_nm = next(c for c in df.columns if "종목명" in str(c))
+        c_q = next(c for c in df.columns if "수량" in str(c)); c_ev = next(c for c in df.columns if "평가" in str(c))
+    except StopIteration: return {}, ""
+    _CASH_CACHE.pop((fund_code, actual), None)
+    out = {}
+    for _, v in df.iterrows():
+        nm = str(v[c_nm]).strip(); cd = str(v[c_cd]).strip()
+        if not nm or nm == "nan": continue
+        try: ev = float(str(v[c_ev]).replace(",", ""))
+        except (ValueError, TypeError): ev = 0.0
+        if any(sk in nm for sk in SKIP) or cd.startswith("KRD") or cd.startswith("CASH"):
+            _note_cash(fund_code, actual, nm, ev); continue
+        try: q = float(str(v[c_q]).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if not q: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if ev else None)]
+    # 교차검증: AJAX 상위10 수량이 엑셀과 다르면(다른 날 파일) 버린다
+    for it in top:
+        nm = str(it.get("GUSEONG_NAME") or "").strip()
+        if nm in out:
+            try:
+                if abs(float(str(it.get("JEUNGGWON")).replace(",", "")) - out[nm][0]) > 1e-6: return {}, ""
+            except (ValueError, TypeError): pass
+    return (out, actual) if out else ({}, "")
+
+# ── fetcher: 대신자산운용(DAISHIN, asset.daishin.com) — 공시/PDF 게시판에 매 영업일 'ETF명_YYYYMMDD' 엑셀이 올라온다 ──
+# 흐름: 게시판 검색(POST q=YYYYMMDD) → 제목에 키워드가 들고 '_YYYYMMDD'로 끝나는 글 idx → 상세페이지 vDown.php?idx=파일번호 → xlsx.
+# 엑셀 A2 = PDF 기준일(YYYY-MM-DD), 헤더행 [번호,펀드구분,ETF명,자산구분,종목코드,종목명,수량,가격,평가액,비중]. 가격=전영업일 종가.
+# 원화현금(KRD010010001)은 1CU 현금으로 기록. 기준일은 요청일이 아니라 엑셀에 적힌 날짜를 반환(미게시·미래일은 글이 없어 빈값).
+# 주의: 2026-10-23 게시분은 5개 ETF 전부 첨부가 0바이트(서버 결함) → 그런 날은 FunETF 폴백(최신분·실제 기준일 반환).
+_DS_BASE = "https://asset.daishin.com"
+_DAISHIN_KRX = {"AI반도체": "486240"}   # 키워드 → KRX 단축코드(FunETF 폴백용)
+
+def fetch_daishin(kw, ymd):
+    try:
+        out, actual = _daishin_direct(kw, ymd)
+    except Exception as ex:      # 상세·첨부 요청 시간초과, 깨진 엑셀, 헤더 변경 등 → FunETF로 넘어간다
+        print(f"  [DAISHIN] 직접 경로 실패({type(ex).__name__}) → FunETF", flush=True)
+        out, actual = {}, ""
+    if out: return out, actual
+    code = _DAISHIN_KRX.get(kw, "")
+    if not code: return {}, ""
+    fm, fd = fetch_funetf(krx_isin(code), key=kw)   # 최신분만 → 실제 기준일 그대로 반환
+    if fm: print(f"  [DAISHIN] FunETF 폴백 {len(fm)}종목 (기준일 {fd})", flush=True)
+    return (fm, fd) if fm else ({}, "")
+
+def _daishin_direct(kw, ymd):
+    import re, io
+    import pandas as pd
+    hdr = {"User-Agent": UA, "Accept-Language": "ko-KR"}
+    lst = f"{_DS_BASE}/ko/?pages=etf&sub=etf5011&tab=tab02"
+    try:
+        r = requests.post(lst, data={"q": ymd, "y": "", "no": "0"}, headers=hdr, timeout=(5, 20))
+    except requests.exceptions.RequestException as ex:
+        print(f"  [DAISHIN] 게시판 접속 실패({type(ex).__name__})", flush=True)
+        return {}, ""
+    hits = re.findall(r"m=view&idx=(\d+)'\);\">([^<]*)</a>", r.text)
+    idx = next((i for i, t in hits if kw in t and t.strip().endswith("_" + ymd)), None)
+    if not idx:
+        return {}, ""                      # 아직 미게시(미래일 포함) → 대기
+    v = requests.get(f"{lst}&catecode=19&m=view&idx={idx}", headers=hdr, timeout=(5, 20))
+    f = re.search(r"vDown\.php\?idx=(\d+)", v.text)
+    if not f:
+        print(f"  [DAISHIN] {ymd} 첨부 없음 (글 {idx})", flush=True)
+        return {}, ""
+    x = requests.get(f"{_DS_BASE}/inc/vDown.php?idx={f.group(1)}",
+                     headers=dict(hdr, Referer=f"{lst}&catecode=19&m=view&idx={idx}"), timeout=(5, 30))
+    if x.status_code != 200 or not x.content.startswith(b"PK"):
+        print(f"  [DAISHIN] 파일 HTTP {x.status_code} len={len(x.content)}", flush=True)
+        return {}, ""
+    df = pd.read_excel(io.BytesIO(x.content), header=None)
+    m = re.search(r"(\d{4})-?(\d{2})-?(\d{2})", str(df.iat[1, 0]))
+    actual = "".join(m.groups()) if m else ""
+    if not actual:
+        return {}, ""
+    hrow = next(i for i in range(len(df)) if any("종목명" in str(c) for c in df.iloc[i]))
+    cols = [str(c).strip() for c in df.iloc[hrow]]
+    c_nm, c_q = cols.index("종목명"), cols.index("수량")
+    c_ev = next((k for k, c in enumerate(cols) if "평가" in c), None)
+    _CASH_CACHE.pop((kw, actual), None)   # 재조회 시 현금 누적 방지
+    out = {}
+    for _, row in df.iloc[hrow + 1:].iterrows():
+        nm = str(row.iloc[c_nm]).strip()
+        if not nm or nm == "nan": continue
+        try: ev = float(str(row.iloc[c_ev]).replace(",", "")) if c_ev is not None else 0.0
+        except (ValueError, TypeError): ev = 0.0
+        if any(s in nm for s in SKIP):
+            _note_cash(kw, actual, nm, ev); continue
+        try: q = float(str(row.iloc[c_q]).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if not q: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if ev else None)]
+    return (out, actual) if out else ({}, "")
+
+# ── fetcher: 한국투자신탁운용(ACE, aceetf.co.kr) — Next.js SPA가 부르는 papi JSON API ──
+#   GET https://papi.aceetf.co.kr/api/funds/{fundCd}/pdf?page=1&size=1000&std_dt=YYYYMMDD
+#   → {std_DT:'YYYY-MM-DD', last_STD_DT, pdfList:[{sec_NM, jm_KSC_CD, cu_ITEM_CNT(1CU수량,문자열), val_AM(평가금액), wg}]}
+#   std_dt는 대시 없이(YYYYMMDD) — 대시 넣으면 빈값. 미래·휴장일은 std_DT=None·빈 리스트(echo/clamp 없음).
+#   pdfList에 원화현금 행이 없다 → 1CU 현금은 FunETF(최신분만 주므로 actual==last_STD_DT이고 FunETF 기준일도 같을 때만)에서 보충.
+#   fundCd 찾기: GET papi.aceetf.co.kr/api/funds?searchValue=<이름> → data[].fundCd (385600 = K55101DH7878)
+_ACE_KRX = {"K55101DH7878": "385600"}
+def fetch_ace(fund_cd, ymd):
+    import time
+    j = None
+    for i in range(3):          # papi는 간헐적으로 응답이 멈춘다(ReadTimeout 실측) → 재시도
+        try:
+            r = requests.get(f"https://papi.aceetf.co.kr/api/funds/{fund_cd}/pdf",
+                             params={"page": 1, "size": 1000, "std_dt": ymd},
+                             headers={"User-Agent": UA, "Accept": "application/json",
+                                      "Referer": f"https://www.aceetf.co.kr/fund/{fund_cd}",
+                                      "Origin": "https://www.aceetf.co.kr"}, timeout=(5, 15))
+            j = r.json(); break
+        except (requests.exceptions.RequestException, ValueError) as ex:
+            print(f"  [ACE {fund_cd}] {ymd} 시도{i+1} 실패: {type(ex).__name__}", flush=True)
+            time.sleep(2 * (i + 1))
+    if not isinstance(j, dict): return {}, ""
+    actual = str(j.get("std_DT") or "").replace("-", "")
+    rows = j.get("pdfList") or []
+    if not actual or not rows: return {}, ""
+    out = {}
+    for it in rows:
+        nm = str(it.get("sec_NM") or "").strip()
+        if not nm: continue
+        d_row = str(it.get("std_DT") or "").replace("-", "")
+        if d_row and d_row != actual: continue
+        try: ev = float(it.get("val_AM") or 0)
+        except (ValueError, TypeError): ev = 0.0
+        if any(s in nm for s in SKIP):
+            _note_cash(fund_cd, actual, nm, ev); continue
+        try: q = float(str(it.get("cu_ITEM_CNT") or 0).replace(",", ""))
+        except (ValueError, TypeError): continue
+        if not q: continue
+        if nm in out: out[nm][0] += q
+        else: out[nm] = [q, (ev / q if ev else None)]
+    latest = str(j.get("last_STD_DT") or "").replace("-", "")
+    if out and actual == latest and (fund_cd, actual) not in _CASH_CACHE and fund_cd in _ACE_KRX:
+        try:   # 현금행 미제공 → FunETF가 같은 기준일이면 그 원화현금만 차용
+            fm, fd = fetch_funetf(krx_isin(_ACE_KRX[fund_cd]), key="_ace_tmp")
+            c = _CASH_CACHE.pop(("_ace_tmp", fd), None)
+            if fd == actual and c: _CASH_CACHE[(fund_cd, actual)] = c
+        except Exception: pass
+    return (out, actual) if out else ({}, "")
+
+# ── 발송 그룹 ─────────────────────────────────────────────────
+# 2026-10-29 사용자 요청: 아침 리포트를 4개로 나눠 각각 보낸다(채널마다 그룹별 사진 1장씩, 길면 그 그룹만 앨범).
+# ETFS 의 "grp" 로 소속을 정한다. 그룹마다 따로 완결 판정·발송하므로 한 그룹이 늦어도 다른 그룹은 먼저 나간다.
+REPORT_GROUPS = [("kosdaq", "코스닥 액티브"), ("semi", "반도체 액티브"), ("bio", "바이오 액티브"), ("ess", "ESS·2차전지 액티브")]
+REPORT_LABEL = dict(REPORT_GROUPS)
+
+def short_name(name):
+    """상태줄용 약칭: 첫 단어(운용사 브랜드). 등록 ETF 사이에서 겹치면 둘째 단어('액티브' 뗀 앞 4자)를 붙인다."""
+    w = name.split()
+    first = [x["name"].split()[0] for x in ETFS]
+    return w[0] if first.count(w[0]) == 1 or len(w) < 2 else f"{w[0]} {w[1].replace('액티브', '')[:4]}"
+
+def group_status_line(gs):
+    """한 발송 그룹의 상태줄: '캡처 5/6 · 전일분: … · 대기: … · 검증필요 N건'."""
+    done = [g for g in gs if g["state"] == "captured"]
+    lag = [short_name(g["etf"]) for g in done if g.get("asof")]
+    pend = [short_name(g["etf"]) for g in gs if g["state"] != "captured"]
+    blocked = sum(1 for g in done for r in g["buy"] + g["sell"] if r.get("검증") == "불가")
+    line = (f"캡처 {len(done)}/{len(gs)}" + (f"  ·  전일분: {', '.join(lag)}" if lag else "")
+            + (f"  ·  대기: {', '.join(pend)}" if pend else "  ·  전부 반영 완료"))
+    return line + (f"  ·  검증필요 {blocked}건" if blocked else "")
+
 # ── 등록된 액티브 ETF ──────────────────────────────────────────
 # krx: KRX 단축코드(상장좌수 조회용), cu: 설정단위(CU) 크기 → 전체CU수 = 좌수/cu
 ETFS = [
-    {"name":"KoAct 코스닥액티브","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFU6","krx":"0163Y0","cu":50000},
-    {"name":"KoAct 바이오헬스케어액티브","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFJ9","krx":"462900","cu":50000},
-    {"name":"TIME 코스닥액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"24","krx":"0162Y0","cu":50000},
-    {"name":"TIME K바이오액티브","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"13","krx":"463050","cu":50000},
-    {"name":"PLUS 코스닥150액티브","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399","krx":"0166N0","cu":50000},
-    {"name":"RISE 바이오TOP10액티브","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000,"lag":True},  # 클라우드는 kbam 접속 불가 → FunETF 전일분(2026-10-23)
-    {"name":"TIGER 기술이전바이오액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":10000,"lag":True},  # CU=10000 (좌수/CU 정수검증으로 확정; 기존 config 20000은 오류)
+    {"name":"KoAct 코스닥액티브","grp":"kosdaq","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFU6","krx":"0163Y0","cu":50000},
+    {"name":"KoAct 바이오헬스케어액티브","grp":"bio","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFJ9","krx":"462900","cu":50000},
+    {"name":"TIME 코스닥액티브","grp":"kosdaq","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"24","krx":"0162Y0","cu":50000},
+    {"name":"TIME K바이오액티브","grp":"bio","am":"타임폴리오","mode":"dateapi","fetch":fetch_time,"id":"13","krx":"463050","cu":50000},
+    {"name":"PLUS 코스닥150액티브","grp":"kosdaq","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006399","krx":"0166N0","cu":50000},
+    {"name":"RISE 바이오TOP10액티브","grp":"bio","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44I0","krx":"0000Z0","cu":50000,"lag":True},  # 클라우드는 kbam 접속 불가 → FunETF 전일분(2026-10-23)
+    {"name":"TIGER 기술이전바이오액티브","grp":"bio","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70168K0008","krx":"0168K0","cu":10000,"lag":True},  # CU=10000 (좌수/CU 정수검증으로 확정; 기존 config 20000은 오류)
     # 2026-10-16 추가: 코스닥액티브 나머지 3종. "lag":True = 당일분이 늦거나 전일 PDF까지만 오는 ETF
     #   (클라우드의 TIGER=403·RISE=접속불가 → FunETF/WiseReport, MIDAS=원본 없음 → FunETF/WiseReport. 둘 다 아침엔 전날 PDF)
     #   → 당일분이 없으면 '전일분'으로 표시(run()의 전일분 모드)하고, 아침 발송 완결 판정에서 빠진다(run_daily.LATE).
     #   DS는 자체 사이트가 당일분을 주지만(전일 장 마감 후 갱신) 게시 시각이 검증 전이라 안전망으로 lag.
-    {"name":"DS 코스닥액티브","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000,"lag":True},  # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
-    {"name":"TIGER 코스닥액티브","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70204S0006","krx":"0204S0","cu":10000,"lag":True},  # CU=10000 (좌수 정수검증)
-    {"name":"MIDAS 코스닥액티브","am":"마이다스","mode":"dateapi","fetch":fetch_mirror,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
+    {"name":"DS 코스닥액티브","grp":"kosdaq","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000,"lag":True},  # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
+    {"name":"TIGER 코스닥액티브","grp":"kosdaq","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70204S0006","krx":"0204S0","cu":10000,"lag":True},  # CU=10000 (좌수 정수검증)
+    # 2026-10-29 추가 — 반도체(국내 6종, KoAct 반도체&2차전지 혼합형 제외)·ESS·2차전지(국내 3종). 순서 = 그룹 안 표시 순서(순자산 큰 순).
+    #   CU는 KRX 실좌수(순자산/NAV) 정수배 + (1CU 평가합+현금)/NAV 로 확인. 운용사 직접 소스는 당일분 → lag 아님(늦으면 그 그룹만 08:40까지 대기).
+    #   RISE(kbam)는 클라우드에서 접속 불가 → FunETF 전일분이라 lag. DS는 기존 DS 코스닥과 같은 이유로 lag.
+    {"name":"WON 반도체밸류체인액티브","grp":"semi","am":"우리","mode":"dateapi","fetch":fetch_won,"id":"ETF9","krx":"474590","cu":50000},
+    {"name":"RISE 비메모리반도체액티브","grp":"semi","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44B9","krx":"388420","cu":20000,"lag":True},
+    {"name":"DAISHIN AI반도체&인프라액티브","grp":"semi","am":"대신","mode":"dateapi","fetch":fetch_daishin,"id":"AI반도체","krx":"486240","cu":100000},
+    {"name":"PLUS AI반도체소부장액티브","grp":"semi","am":"한화","mode":"dateapi","fetch":fetch_plus,"id":"006410","krx":"0239Z0","cu":50000},
+    {"name":"RISE 반도체소부장액티브","grp":"semi","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44L2","krx":"0254H0","cu":50000,"lag":True},
+    {"name":"DS AI반도체액티브","grp":"semi","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0243M0","krx":"0243M0","cu":50000,"lag":True},
+    {"name":"RISE 2차전지액티브","grp":"ess","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44C7","krx":"422420","cu":20000,"lag":True},
+    {"name":"KoAct 수소전력ESS인프라액티브","grp":"ess","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFT9","krx":"0150K0","cu":50000},
+    {"name":"ACE 2차전지&친환경차액티브","grp":"ess","am":"한국투자","mode":"dateapi","fetch":fetch_ace,"id":"K55101DH7878","krx":"385600","cu":100000},
+    {"name":"MIDAS 코스닥액티브","grp":"kosdaq","am":"마이다스","mode":"dateapi","fetch":fetch_mirror,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
     #   fetch_unicorn·fetch_db 함수는 코드에 유지 → 재추가 가능.
 ]
@@ -816,10 +1057,7 @@ def run(today=None, weekly=True):
     # 출력 빌드 (스냅샷에서, 8개 전부 상태 포함)
     groups = []; csv_rows = []; done = 0; pend = []; blocked = 0
     lagged = []
-    _first = [x["name"].split()[0] for x in ETFS]
-    def _short(e):   # 상태줄용 약칭: 'TIGER 코스닥'처럼 첫 단어가 겹치면 둘째 단어('액티브' 뗀 앞 4자)를 붙여 구분
-        w = e["name"].split()
-        return w[0] if _first.count(w[0]) == 1 or len(w) < 2 else f"{w[0]} {w[1].replace('액티브', '')[:4]}"
+    def _short(e): return short_name(e["name"])
     for e in ETFS:
         kk = snap.get(f"{e['am']}:{e['id']}", {})
         cur = t_ymd if t_ymd in kk else None
@@ -863,7 +1101,8 @@ def run(today=None, weekly=True):
             cashr = round(cpc / (cpc + spc) * 100, 1) if (cpc is not None and (cpc + spc) > 0) else None
             groups.append({"etf": e["name"], "am": e["am"], "state": "captured", "buy": buy, "sell": sell,
                            "aum": aum, "cash": cash, "cashr": cashr, "pk": pk, "win": len(win),
-                           "asof": (cur if cur != t_ymd else None)})   # asof = 전일분일 때의 PDF 기준일
+                           "asof": (cur if cur != t_ymd else None),    # asof = 전일분일 때의 PDF 기준일
+                           "grp": e.get("grp", "kosdaq")})
             blocked += sum(1 for r in rows if r.get("검증") == "불가")
             for r in rows:
                 csv_rows.append([e["name"], e["am"], cur, pk, r["구분"], r["종목명"],
@@ -881,7 +1120,8 @@ def run(today=None, weekly=True):
                                  (int(r["직전보유"][1]) if r.get("직전보유") else ""),
                                  (r.get("보류금액") if r.get("보류금액") is not None else "")])
         else:
-            groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": []})
+            groups.append({"etf": e["name"], "am": e["am"], "state": "pending", "buy": [], "sell": [],
+                           "grp": e.get("grp", "kosdaq")})
             pend.append(_short(e))
     status_line = (f"캡처 {done}/{len(ETFS)}" + (f"  ·  전일분: {', '.join(lagged)}" if lagged else "")
                    + (f"  ·  대기: {', '.join(pend)}" if pend else "  ·  전부 반영 완료"))
@@ -1065,7 +1305,7 @@ def write_excel(groups, today, prev, status_line="", title=None, lbl_cur="당일
     def mergerow(r): ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=NC)
 
     mergerow(1)
-    ws["A1"] = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pd_}"
+    ws["A1"] = title or f"액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pd_}"
     ws["A1"].font = Font(bold=True, size=14); ws["A1"].alignment = Alignment(vertical="center")
     ws.row_dimensions[1].height = 26
     if status_line:
@@ -1166,7 +1406,7 @@ def _eok(x):
     return "-" if x is None else f"{x/1e8:+,.1f}억"
 
 def render_report_image(groups, today, prev, status_line="", title=None,
-                        lbl_cur="당일", lbl_prev="전영업일", out_png=None, part=None):
+                        lbl_cur="당일", lbl_prev="전영업일", out_png=None, part=None, label="코스닥 액티브"):
     """엑셀 표를 한 장의 PNG로 렌더(ETF별 매수/매도). 반환: 경로, 변화 없으면 None.
     part=(i, n) 이면 여러 장 중 i번째 — 제목에 (i/n) 표시(render_report_parts 가 나눠 부른다)."""
     _setup_mpl_font()
@@ -1227,7 +1467,7 @@ def render_report_image(groups, today, prev, status_line="", title=None,
                 s = t.get_text()
                 if s: t.set_fontsize(max(6.5, min(10, 10 * 13 / len(s))))
     sub = f"\n{status_line}" if status_line else ""
-    sup = title or f"코스닥 액티브 ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pdd}"
+    sup = title or f"{label} ETF PDF 변화   ·   {lbl_cur} {td}  vs  {lbl_prev} {pdd}"
     if part: sup += f"   ({part[0]}/{part[1]})"
     fig.suptitle(sup + sub, fontsize=13, fontweight="bold", y=1 - 0.12 / fig_h, va="top")
     out_png = out_png or os.path.join(BASE, f"pdf_change_{today.strftime('%Y%m%d')}.png")
@@ -1235,7 +1475,8 @@ def render_report_image(groups, today, prev, status_line="", title=None,
     return out_png
 
 def render_report_image_mobile(groups, today, prev, status_line="", title=None,
-                               lbl_cur="당일", lbl_prev="전영업일", out_png=None, part=None, totals=None):
+                               lbl_cur="당일", lbl_prev="전영업일", out_png=None, part=None, totals=None,
+                               label="코스닥 액티브"):
     """모바일 세로 표형(무채색). ETF명 → ▼매수 → ▼매도, 정보는 칸(셀)으로 구분.
     글자 크게 + 양옆 여백 최소. part=(i, n)·totals=(ETF수, 매수, 매도) 는 여러 장으로 나눌 때 —
     제목에 (i/n), 요약줄은 이 장이 아니라 전체 합계."""
@@ -1321,7 +1562,7 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
     n = len(caps)
     if totals: n, tot_b, tot_s = totals
     summary = f"변화 {n}개 ETF  ·  매수 {tot_b} / 매도 {tot_s} 종목"
-    head = "코스닥 액티브 ETF PDF 변화" + (f"  ({part[0]}/{part[1]})" if part else "")
+    head = f"{label} ETF PDF 변화" + (f"  ({part[0]}/{part[1]})" if part else "")
     sup = title or f"{head}\n{lbl_cur} {td}  vs  {lbl_prev} {pdd}"
     fig.suptitle(f"{sup}\n{summary}", fontsize=11.5, fontweight="bold", y=1 - 0.12 / fig_h, va="top")
     out_png = out_png or os.path.join(BASE, f"pdf_change_m_{today.strftime('%Y%m%d')}.png")
@@ -1337,6 +1578,9 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
 # 줄이므로 세로로 긴 장은 글자가 작아진다(가로형 2107×4447px → 약 1/4). 가로형은 세로 ≤1600(화면에 약 0.6배 이상),
 # 모바일형은 세로 ≤2100(글자가 커서 0.45배여도 읽힘, 폰에선 화면 폭을 꽉 채움). 긴 변 ≤ 2560이라 해상도도 안 깎인다.
 MAX_PART_PX = {"wide": 1600, "mobile": 2100}
+# 2026-10-29 사용자: 4개 그룹으로 나누면서 '아침에 사진 4장 하나씩' → 그룹당 1장이 기본. PC용 상한(위)은 끄고,
+# 텔레그램 사진 한계(가로+세로 ≤ 10000px — 넘으면 파일로 감)에 걸릴 때만 나눈다(여유 두고 가로형 7000·모바일형 8000).
+MAX_PART_PX = {"wide": 7000, "mobile": 8000}
 
 def _chunk_name(g):
     """여러 장에 걸친 ETF 조각이면 이름 뒤에 (i/n)."""
@@ -1410,8 +1654,9 @@ def _split_caps(caps, est, base_px, max_px):
             return parts
         k += 1
 
-def render_report_parts(kind, groups, today, prev, status_line=""):
-    """kind='wide'(채널1) | 'mobile'(채널2) → [PNG 경로...]. 짧으면 기존 파일명 1장, 길면 _1·_2… 여러 장. 변화 없으면 []."""
+def render_report_parts(kind, groups, today, prev, status_line="", label="코스닥 액티브", tag=""):
+    """kind='wide'(채널1) | 'mobile'(채널2) → [PNG 경로...]. 짧으면 1장, 길면 _1·_2… 여러 장. 변화 없으면 [].
+    label 은 제목(예: '반도체 액티브'), tag 는 파일명 구분(그룹 키 — 그룹별 이미지가 서로 덮어쓰지 않게)."""
     caps = [g for g in groups if g["state"] == "captured" and (g["buy"] or g["sell"])]
     if not caps:
         return []
@@ -1419,18 +1664,33 @@ def render_report_parts(kind, groups, today, prev, status_line=""):
         render, est, base, stem = render_report_image, _est_px_wide, 330, "pdf_change"
     else:
         render, est, base, stem = render_report_image_mobile, _est_px_mobile, 330, "pdf_change_m"
+    ymd = today.strftime("%Y%m%d") + (f"_{tag}" if tag else "")
     pieces = _chunk_oversized(caps, kind, est, base, MAX_PART_PX[kind])
     parts = _split_caps(pieces, est, base, MAX_PART_PX[kind])
     if len(parts) == 1:
-        return [render(groups, today, prev, status_line)]
-    ymd = today.strftime("%Y%m%d")
+        return [render(groups, today, prev, status_line, label=label, out_png=os.path.join(BASE, f"{stem}_{ymd}.png"))]
     totals = (len(caps), sum(len(g["buy"]) for g in caps), sum(len(g["sell"]) for g in caps))
     out = []
     for i, p in enumerate(parts, 1):
-        kw = {"part": (i, len(parts)), "out_png": os.path.join(BASE, f"{stem}_{ymd}_{i}.png")}
+        kw = {"part": (i, len(parts)), "label": label, "out_png": os.path.join(BASE, f"{stem}_{ymd}_{i}.png")}
         if kind != "wide": kw["totals"] = totals
         out.append(render(p, today, prev, status_line, **kw))
     return out
+
+def send_text(text, token=None, chat=None):
+    """짧은 텍스트 메시지(변화 없는 그룹 알림 등)."""
+    tok = token or os.environ.get("TELEGRAM_TOKEN"); chat = chat or os.environ.get("TELEGRAM_CHAT_ID")
+    if not (tok and chat):
+        print("  [텔레그램] 토큰/챗ID 미설정 — 전송 스킵"); return False
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+                          data={"chat_id": chat, "text": text[:4000]}, timeout=60)
+        if r.ok and r.json().get("ok"):
+            print("  [텔레그램] 텍스트 전송 완료"); return True
+        print(f"  [텔레그램] 텍스트 실패: {r.text[:150]}")
+    except Exception as e:
+        print(f"  [텔레그램] 텍스트 오류: {type(e).__name__}: {e}")
+    return False
 
 def _send_album(paths, caption="", token=None, chat=None):
     """여러 장을 앨범(sendMediaGroup, 최대 10장씩)으로. 캡션은 첫 장. 앨범이 거부되면 한 장씩(사진→파일).
