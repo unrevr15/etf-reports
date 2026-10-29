@@ -800,11 +800,12 @@ ETFS = [
     #   DS는 자체 사이트가 당일분을 주지만(전일 장 마감 후 갱신) 게시 시각이 검증 전이라 안전망으로 lag.
     {"name":"DS 코스닥액티브","grp":"kosdaq","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0220B0","krx":"0220B0","cu":50000,"lag":True},  # CU=50000 (좌수 정수검증 8일 + 1CU평가액÷NAV=50,000)
     {"name":"TIGER 코스닥액티브","grp":"kosdaq","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR70204S0006","krx":"0204S0","cu":10000,"lag":True},  # CU=10000 (좌수 정수검증)
+    # 2026-10-30: SOL·WON·ACE는 아침 07:20에도 당일 PDF 미게시(첫 실전) → 그룹 발송을 붙잡지 않게 lag(없으면 전일분).
     # 2026-10-29 추가 — 반도체(국내 6종, KoAct 반도체&2차전지 혼합형 제외)·ESS·2차전지(국내 3종). 순서 = 그룹 안 표시 순서(순자산 큰 순).
     #   CU는 KRX 실좌수(순자산/NAV) 정수배 + (1CU 평가합+현금)/NAV 로 확인. 운용사 직접 소스는 당일분 → lag 아님(늦으면 그 그룹만 08:40까지 대기).
     #   RISE(kbam)는 클라우드에서 접속 불가 → FunETF 전일분이라 lag. DS는 기존 DS 코스닥과 같은 이유로 lag.
-    {"name":"SOL 코리아메가테크액티브","grp":"semi","am":"신한","mode":"dateapi","fetch":fetch_sol,"id":"210940","krx":"444200","cu":50000},   # 2026-10-29 추가(이름에 반도체 없지만 삼성·하이닉스 중심 국내 100%)
-    {"name":"WON 반도체밸류체인액티브","grp":"semi","am":"우리","mode":"dateapi","fetch":fetch_won,"id":"ETF9","krx":"474590","cu":50000},
+    {"name":"SOL 코리아메가테크액티브","grp":"semi","am":"신한","mode":"dateapi","fetch":fetch_sol,"id":"210940","krx":"444200","cu":50000,"lag":True},   # 2026-10-29 추가(이름에 반도체 없지만 삼성·하이닉스 중심 국내 100%)
+    {"name":"WON 반도체밸류체인액티브","grp":"semi","am":"우리","mode":"dateapi","fetch":fetch_won,"id":"ETF9","krx":"474590","cu":50000,"lag":True},
     {"name":"TIGER 코리아테크액티브","grp":"semi","am":"미래에셋","mode":"dateapi","fetch":fetch_tiger,"id":"KR7471780007","krx":"471780","cu":10000,"lag":True},
     {"name":"RISE 비메모리반도체액티브","grp":"semi","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44B9","krx":"388420","cu":20000,"lag":True},
     {"name":"DAISHIN AI반도체&인프라액티브","grp":"semi","am":"대신","mode":"dateapi","fetch":fetch_daishin,"id":"AI반도체","krx":"486240","cu":100000},
@@ -814,7 +815,7 @@ ETFS = [
     {"name":"DS AI반도체액티브","grp":"semi","am":"DS","mode":"dateapi","fetch":fetch_ds,"id":"0243M0","krx":"0243M0","cu":50000,"lag":True},
     {"name":"RISE 2차전지액티브","grp":"ess","am":"KB","mode":"dateapi","fetch":fetch_rise,"id":"44C7","krx":"422420","cu":20000,"lag":True},
     {"name":"KoAct 수소전력ESS인프라액티브","grp":"ess","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFT9","krx":"0150K0","cu":50000},
-    {"name":"ACE 2차전지&친환경차액티브","grp":"ess","am":"한국투자","mode":"dateapi","fetch":fetch_ace,"id":"K55101DH7878","krx":"385600","cu":100000},
+    {"name":"ACE 2차전지&친환경차액티브","grp":"ess","am":"한국투자","mode":"dateapi","fetch":fetch_ace,"id":"K55101DH7878","krx":"385600","cu":100000,"lag":True},
     {"name":"KoAct 반도체&2차전지핵심소재액티브","grp":"ess","am":"삼성액티브","mode":"dateapi","fetch":fetch_samsungactive,"id":"2ETFM8","krx":"482030","cu":50000},
     {"name":"MIDAS 코스닥액티브","grp":"kosdaq","am":"마이다스","mode":"dateapi","fetch":fetch_mirror,"id":"0191B0","krx":"0191B0","cu":25000,"lag":True},   # 자체 사이트에 PDF 없음 / CU=25000 (1CU평가액÷NAV≈24,993; 좌수 20만좌 고정이라 정수검증 불가)
     # 제외(2026-06-01, 사용자 요청): UNICORN 포스트IPO(현대, 111188:476000) / 마이티(DB, 0001P0, WiseReport).
