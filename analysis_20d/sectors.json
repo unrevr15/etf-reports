@@ -1068,5 +1068,25 @@
 "code": "468530",
 "sector": null,
 "market": "KOSDAQ"
+},
+"루닛": {
+"code": "328130",
+"sector": null,
+"market": "KOSDAQ"
+},
+"아이씨티케이": {
+"code": "456010",
+"sector": null,
+"market": "KOSDAQ"
+},
+"엑시콘": {
+"code": "092870",
+"sector": null,
+"market": "KOSDAQ"
+},
+"원익홀딩스": {
+"code": "030530",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
