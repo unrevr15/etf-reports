@@ -37,6 +37,8 @@ def prune():
         return
     pdf = load(PDF_FILE)
     need = {nm for eid in pdf for y in pdf[eid] for nm in (pdf[eid][y] or {})}
+    import analyze   # 그룹 스냅샷(일일 리포트) 종목도 포함
+    need |= {nm for k, d in analyze.SNAP.items() for y in d if y in keep for nm in (d[y] or {})}
     px = {y: {k: v for k, v in m.items() if k in need} for y, m in px.items() if y in keep}
     with open(pxf, "w", encoding="utf-8") as fp: json.dump(px, fp, ensure_ascii=False)
     log(f"캐시 정리 — 보관 {len(keep)}영업일, 종가 {len(need)}종목")
@@ -52,22 +54,39 @@ def main():
     import subprocess
     subprocess.run([sys.executable, os.path.join(HERE, "sectors.py")], cwd=HERE)
 
-    # 2) 차트 생성
+    # 2) 차트 생성 — 2026-11-02부터 '통합 자금흐름 1 + 액티브 그룹 4'(일일 리포트와 같은 그룹)
     log("3) 차트 생성")
     import importlib
     import analyze; importlib.reload(analyze)
     import charts; importlib.reload(charts)
-    rows, skipped = analyze.net_buys()
-    agg, detail = analyze.flows_aum()
-    note = charts.coverage_note(rows, skipped)
     from themes import ORDER
+    from universe import active_groups
     tag = analyze.DAYS[-1]
-    p1 = charts.chart1(agg, os.path.join(HERE, f"주간_자금유출입_{tag}.png"))
-    p2 = charts.chart2(rows, os.path.join(HERE, f"주간_테마비중_{tag}.png"), note,
-                       order=ORDER, cmp_days=CMP_DAYS)
-    p3 = charts.chart3(rows, os.path.join(HERE, f"주간_종목별_{tag}.png"), note=note)
+    d0 = analyze.DAYS[max(0, len(analyze.DAYS) - 1 - CMP_DAYS)]
+    span = f"{d0[4:6]}/{d0[6:]} → {tag[4:6]}/{tag[6:]} ({CMP_DAYS}영업일)"
+    F, fdays = analyze.flows_by_category()
+    msgs = [([charts.chart_flows(F, fdays, os.path.join(HERE, f"주간_자금유출입_{tag}.png"), cmp_days=CMP_DAYS)],
+             f"[주간] ① 자금 유출입·순자산 (패시브 통합 + 액티브 4그룹)  ·  {span}")]
+    for gk, lab, es in active_groups():
+        rows, skipped = analyze.group_net_buys(es)
+        note = charts.coverage_note(rows, skipped)
+        # 보유비중 비교는 주초와 현재 PDF가 '둘 다' 있는 ETF만 — 한쪽만 있으면 비중이 0에서 출발하는 착시가 생긴다
+        i0 = max(0, len(analyze.DAYS) - 1 - CMP_DAYS)
+        es_cmp = [e for e in es if analyze._snap_of(e).get(analyze.DAYS[i0]) and analyze._snap_of(e).get(analyze.DAYS[-1])]
+        basis = f"{lab} {len(es_cmp)}종" + (f"(주초 PDF 없는 {len(es) - len(es_cmp)}종 제외)" if len(es_cmp) < len(es) else "")
+        if not es_cmp:        # 주초 PDF가 있는 ETF가 없음(신규 편입 첫 주) → 비중 비교 생략
+            p2 = None; log(f"  [{lab}] 주초 PDF 없음 — 보유비중 변화 생략(다음 주부터)")
+        elif gk == "kosdaq":  # 업종이 섞인 그룹만 테마 덤벨이 의미 있다
+            p2 = charts.chart2(rows, os.path.join(HERE, f"주간_{gk}_테마비중_{tag}.png"), note, order=ORDER,
+                               cmp_days=CMP_DAYS, weights=analyze.group_holdings(es_cmp, "theme"), label=lab, basis=basis)
+        else:                 # 반도체·바이오·2차전지는 사실상 한 업종 → 종목 보유비중 변화
+            p2 = charts.chart_stock_weights(analyze.group_holdings(es_cmp, "stock"), rows,
+                                            os.path.join(HERE, f"주간_{gk}_종목비중_{tag}.png"), lab, basis,
+                                            cmp_days=CMP_DAYS, note=note)
+        p3 = charts.chart3(rows, os.path.join(HERE, f"주간_{gk}_종목별_{tag}.png"), note=note, label=lab) if rows else None
+        msgs.append(([x for x in (p2, p3) if x], f"[주간] {lab} ETF  ·  {span}\n② 보유비중 변화   ③ 종목별 순매수"))
 
-    # 3) 전송 — 대상마다 봇 토큰이 다름(채널1=봇1, 채널2·DM=봇2)
+    # 3) 전송 — 대상마다 봇 토큰이 다름(채널1=봇1, 채널2·DM=봇2). 메시지마다 사진 묶음(앨범) 1개.
     T1, T2 = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_TOKEN2")
     targets = []                                   # [(라벨, 토큰, chat_id)]
     if os.getenv("WEEKLY_TO_CH1", "1") == "1" and T1 and os.getenv("TELEGRAM_CHAT_ID"):
@@ -78,14 +97,10 @@ def main():
         targets.append(("DM", T2, os.getenv("TELEGRAM_DM_ID")))
     if not targets:
         log("전송 대상 미설정 — 파일만 생성"); return
-    d0 = analyze.DAYS[max(0, len(analyze.DAYS) - 1 - CMP_DAYS)]
-    cap = (f"[주간] 코스닥 액티브 ETF  ·  {d0[:4]}-{d0[4:6]}/{d0[6:]} → {tag[4:6]}/{tag[6:]} ({CMP_DAYS}영업일)\n"
-           f"① 자금유출입·순자산   ② 테마 보유비중 변화   ③ 종목별 순매수")
-    pics = [p for p in (p1, p2, p3) if p]
     for lab, tk, ch in targets:
-        log(f"  → {lab} 전송 ({len(pics)}장)")
-        for i, p in enumerate(pics):
-            P.send_telegram(p, cap if i == 0 else "", token=tk, chat=ch)
+        log(f"  → {lab} 전송 (메시지 {len(msgs)}개)")
+        for pics, cap in msgs:
+            if pics: P.send_telegram(pics, cap, token=tk, chat=ch)
 
     # 4) 캐시 슬림화
     prune()
