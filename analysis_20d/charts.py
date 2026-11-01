@@ -123,7 +123,7 @@ def coverage_note(rows, skipped):
     base = f"대상: 액티브 {len(used)}종"
     if miss:
         m = ", ".join(f"{k.split()[0]} {k.split()[-1][:6]}({v}일)" for k, v in miss.items())
-        return base + f"  ·  ⚠ 데이터 결측 제외: {m}"
+        return base + f"  ·  ※ 데이터 결측 제외: {m}"
     return base + " (전종 완비)"
 
 def _agg_by(rows, key):
@@ -136,10 +136,11 @@ def _topn(d, n):
     tot = {k: sum(v.values()) for k, v in d.items()}
     return sorted(tot, key=lambda k: -abs(tot[k]))[:n], tot
 
-def chart2(rows, out, note="", order=None, ncol=3, cmp_days=None):
-    """테마 보유비중 변화 — 덤벨(수준+변화 동시) + 소형다중(비중 추이, 각자 축)."""
+def chart2(rows, out, note="", order=None, ncol=3, cmp_days=None, weights=None, label="액티브", basis="액티브 4종"):
+    """테마 보유비중 변화 — 덤벨(수준+변화 동시) + 소형다중(비중 추이, 각자 축).
+    weights=(days, W, H) 를 주면 그것을, 없으면 기존 코스닥 4종 theme_weights()."""
     from analyze import theme_weights
-    days, W, H = theme_weights()
+    days, W, H = weights or theme_weights()
     i0 = 0 if not cmp_days else max(0, len(days) - 1 - cmp_days)   # 덤벨 비교 시작점
     win = set(days[i0 + 1:])                                        # %p와 동일 구간의 순매수만 집계
     flow = defaultdict(float)
@@ -150,7 +151,7 @@ def chart2(rows, out, note="", order=None, ncol=3, cmp_days=None):
     fig = plt.figure(figsize=(13.5, 3.8 + nrow * 2.25), dpi=170, facecolor=SURF)
     gs = fig.add_gridspec(1 + nrow, ncol, height_ratios=[1.6] + [1.0] * nrow, hspace=0.62, wspace=0.26)
     nchg = len(days) - 1 - i0
-    fig.suptitle(f"② 액티브 ETF 테마별 보유비중 변화  ·  {days[i0][:4]}-{md(days[i0])} → {md(days[-1])} ({nchg}영업일 변화)",
+    fig.suptitle(f"② {label} ETF 테마별 보유비중 변화  ·  {days[i0][:4]}-{md(days[i0])} → {md(days[-1])} ({nchg}영업일 변화)",
                  fontsize=13, fontweight="bold", color=INK, x=0.012, ha="left", y=0.985)
     # (1) 덤벨 — 시작 비중 → 끝 비중 (수준과 변화를 한 번에)
     ax = fig.add_subplot(gs[0, :]); style(ax, f"보유비중: {md(days[i0])} → {md(days[-1])}", None)
@@ -183,14 +184,14 @@ def chart2(rows, out, note="", order=None, ncol=3, cmp_days=None):
         ax.annotate(f"순매수 {flow.get(g, 0):+,.0f}억", (0.03, 0.06), xycoords="axes fraction",
                     fontsize=8, color=MUTED)   # %p와 같은 구간
     fig.text(0.012, 0.005,
-             "보유비중 = 테마 보유액 ÷ 액티브 4종 주식 보유액 합계  ·  매매(리밸런싱)와 주가등락이 함께 반영된 실제 포지션 변화\n"
+             f"보유비중 = 테마 보유액 ÷ {basis} 주식 보유액 합계  ·  매매(리밸런싱)와 주가등락이 함께 반영된 실제 포지션 변화\n"
              "(설정/환매는 전 종목이 비례 증감해 비중에 영향 없음)  ·  아래 패널은 각자 축\n" + note,
              fontsize=8, color=MUTED)
     fig.savefig(out, facecolor=SURF, bbox_inches="tight"); plt.close(fig)
     return out
 
 
-def chart3(rows, out, topn=15, note=""):
+def chart3(rows, out, topn=15, note="", label="액티브"):
     days = sorted({r["일자"] for r in rows})
     bystk = _agg_by(rows, "종목")
     tot = {k: sum(v.values()) for k, v in bystk.items()}
@@ -198,7 +199,7 @@ def chart3(rows, out, topn=15, note=""):
     sells = sorted(tot.items(), key=lambda kv: kv[1])[:topn]
     fig = plt.figure(figsize=(13.5, 11.5), dpi=170, facecolor=SURF)
     gs = fig.add_gridspec(2, 2, height_ratios=[1.5, 1.0], hspace=0.3, wspace=0.32)
-    fig.suptitle(f"③ 액티브 ETF 종목별 순매수금액  ·  {days[0][:4]}-{md(days[0])} ~ {md(days[-1])} ({len(days)}영업일)",
+    fig.suptitle(f"③ {label} ETF 종목별 순매수금액  ·  {days[0][:4]}-{md(days[0])} ~ {md(days[-1])} ({len(days)}영업일)",
                  fontsize=13, fontweight="bold", color=INK, x=0.012, ha="left", y=0.985)
     for col, (data, lab, color) in enumerate([(buys, f"순매수 상위 {topn}", BUY), (sells, f"순매도 상위 {topn}", SELL)]):
         ax = fig.add_subplot(gs[0, col]); style(ax, f"{len(days)}영업일 누적 {lab}", None)
@@ -320,3 +321,81 @@ if __name__ == "__main__":
     if skipped:
         from collections import Counter
         print("결측:", Counter(s[0] for s in skipped).most_common())
+
+
+# ══ 2026-11-02 주간 리포트 4그룹화 ═══════════════════════════════
+def chart_flows(F, days, out, cmp_days=5):
+    """① 통합 자금흐름 — 패시브 3(코스닥·반도체·2차전지) + 액티브 4그룹.
+    위: 이번 주(최근 cmp_days 영업일) 순유출입 막대 + 현재 순자산 / 아래: 전체 구간 누적 순유출입(패시브·액티브 따로)."""
+    cats = list(F)
+    i0 = max(0, len(days) - cmp_days)
+    wk = {c: sum(F[c]["flow"][i0:]) for c in cats}
+    fig = plt.figure(figsize=(13.5, 10.5), dpi=170, facecolor=SURF)
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.05], hspace=0.38, wspace=0.22)
+    fig.suptitle(f"① 자금 유출입(설정·환매)과 순자산  ·  이번 주 {md(days[i0])} ~ {md(days[-1])} ({len(days)-i0}영업일)",
+                 fontsize=13, fontweight="bold", color=INK, x=0.012, ha="left", y=0.985)
+    ax = fig.add_subplot(gs[0, :]); style(ax, "이번 주 순유출입 (억원)   ·   오른쪽 숫자 = 현재 순자산", None)
+    y = list(range(len(cats)))[::-1]
+    vals = [wk[c] for c in cats]
+    ax.barh(y, vals, color=[BUY if v >= 0 else SELL for v in vals], height=0.62, zorder=2)
+    ax.set_yticks(y); ax.set_yticklabels([f"{c} ({len(F[c]['codes'])}종)" for c in cats], fontsize=10, color=INK)
+    ax.axvline(0, color=BASE, lw=0.9); ax.grid(True, axis="x", color=GRID, lw=0.7); ax.grid(False, axis="y")
+    lo, hi = min(vals + [0]), max(vals + [0]); pad = (hi - lo) * 0.28 or 1
+    ax.set_xlim(lo - pad, hi + pad)
+    for yy, c, v in zip(y, cats, vals):
+        ax.annotate(f"{v:+,.0f}억", (v, yy), textcoords="offset points", xytext=(5 if v >= 0 else -5, 0),
+                    ha="left" if v >= 0 else "right", va="center", fontsize=9, fontweight="bold", color=INK)
+        ax.annotate(f"{F[c]['aum'][-1]:,.0f}억", (1.0, yy), xycoords=("axes fraction", "data"), xytext=(4, 0),
+                    textcoords="offset points", va="center", fontsize=8.5, color=MUTED, annotation_clip=False)
+    x = list(range(len(days)))
+    for col, pref in enumerate(("패시브", "액티브")):
+        ax = fig.add_subplot(gs[1, col]); style(ax, f"{pref} — 누적 순유출입 ({md(days[0])}~{md(days[-1])})", "억원")
+        labs = []
+        for j, c in enumerate([c for c in cats if c.startswith(pref)]):
+            acc = 0.0; cum = []
+            for v in F[c]["flow"]: acc += v; cum.append(acc)
+            ax.plot(x, cum, color=CAT[j % len(CAT)], lw=2, zorder=2)
+            labs.append((cum[-1], f"{c.split('·', 1)[1]} {cum[-1]:+,.0f}"))
+        if i0 > 0: ax.axvspan(i0 - 0.5, len(days) - 0.5, color=GRID, alpha=0.45, zorder=0)
+        zeroline(ax)
+        ax.set_xticks(x[::2]); ax.set_xticklabels([md(days[i]) for i in x[::2]], rotation=45, ha="right")
+        ax.set_xlim(-0.5, len(days) + 4.5)
+        end_labels(ax, labs)
+    fig.text(0.012, 0.005, "순유출입 = 상장좌수 변화 × NAV (주가 등락 제외, 순수 설정·환매)  ·  빨강=유입, 파랑=유출  ·  "
+             "패시브 = 국내 종목형·순자산 300억 이상(레버리지·인버스·커버드콜·해외 제외)  ·  회색 = 이번 주",
+             fontsize=8, color=MUTED)
+    fig.savefig(out, facecolor=SURF, bbox_inches="tight"); plt.close(fig)
+    return out
+
+def chart_stock_weights(weights, rows, out, label, basis, cmp_days=5, topn=15, note=""):
+    """② 그룹 종목별 보유비중 변화 — 현재 비중 상위 topn 의 덤벨(주초 → 현재) + 같은 구간 순매수 금액."""
+    days, W, H = weights
+    i0 = max(0, len(days) - 1 - cmp_days)
+    win = set(days[i0 + 1:])
+    flow = defaultdict(float)
+    for r in rows:
+        if r["일자"] in win: flow[r["종목"]] += r["순매수금액(원)"] / EOK
+    top = sorted(W[-1], key=lambda k: -W[-1][k])[:topn]
+    fig = plt.figure(figsize=(13.5, 2.2 + 0.42 * len(top)), dpi=170, facecolor=SURF)
+    ax = fig.add_subplot(111); style(ax, f"보유비중: {md(days[i0])} → {md(days[-1])}   ·   오른쪽 = 같은 기간 순매수", None)
+    fig.suptitle(f"② {label} ETF 종목별 보유비중 변화  ·  {days[i0][:4]}-{md(days[i0])} → {md(days[-1])} ({len(days)-1-i0}영업일)",
+                 fontsize=13, fontweight="bold", color=INK, x=0.012, ha="left", y=0.995)
+    items = top[::-1]
+    for i, g in enumerate(items):
+        a, b = W[i0].get(g, 0), W[-1].get(g, 0)
+        col = BUY if b >= a else SELL
+        ax.plot([a, b], [i, i], color=col, lw=2.5, zorder=2, solid_capstyle="round")
+        ax.scatter([a], [i], s=42, color=SURF, edgecolor=MUTED, lw=1.4, zorder=3)
+        ax.scatter([b], [i], s=64, color=col, zorder=4)
+        f = flow.get(g, 0.0)
+        ax.annotate(f"{b:.1f}%  ({b-a:+.1f}%p)" + (f"   순매수 {f:+,.0f}억" if abs(f) >= 0.5 else ""), (max(a, b), i),
+                    textcoords="offset points", xytext=(9, 0), va="center", fontsize=9, fontweight="bold", color=INK)
+    ax.set_yticks(range(len(items))); ax.set_yticklabels(items, fontsize=10, color=INK)
+    ax.grid(True, axis="x", color=GRID, lw=0.7); ax.grid(False, axis="y")
+    hi = max([max(W[i0].get(g, 0), W[-1].get(g, 0)) for g in top] + [1])
+    ax.set_xlim(-0.5, hi * 1.55)
+    ax.set_xlabel("보유비중(%)      ○ 주초   ● 현재      빨강=비중 확대, 파랑=축소", fontsize=8.5, color=INK2)
+    fig.text(0.012, 0.005, f"보유비중 = 종목 보유액 ÷ {basis} 주식 보유액 합계(매매와 주가 등락이 함께 반영)  ·  상위 {len(top)}종목\n" + note,
+             fontsize=8, color=MUTED)
+    fig.savefig(out, facecolor=SURF, bbox_inches="tight"); plt.close(fig)
+    return out
