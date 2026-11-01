@@ -1088,5 +1088,55 @@
 "code": "030530",
 "sector": null,
 "market": "KOSDAQ"
+},
+"SFA": {
+"code": "056190",
+"sector": null,
+"market": "KOSDAQ"
+},
+"매커스": {
+"code": "093520",
+"sector": null,
+"market": "KOSDAQ"
+},
+"아이쓰리시스템": {
+"code": "214430",
+"sector": null,
+"market": "KOSDAQ"
+},
+"에스티아이": {
+"code": "039440",
+"sector": null,
+"market": "KOSDAQ"
+},
+"에프에스티": {
+"code": "036810",
+"sector": null,
+"market": "KOSDAQ"
+},
+"와이씨켐": {
+"code": "112290",
+"sector": null,
+"market": "KOSDAQ"
+},
+"원익QnC": {
+"code": "074600",
+"sector": null,
+"market": "KOSDAQ"
+},
+"퓨릿": {
+"code": "445180",
+"sector": null,
+"market": "KOSDAQ"
+},
+"프로텍": {
+"code": "053610",
+"sector": null,
+"market": "KOSDAQ"
+},
+"한솔아이원스": {
+"code": "114810",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
