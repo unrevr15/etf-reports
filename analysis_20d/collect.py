@@ -42,7 +42,10 @@ def collect_krx(days):
     """{ymd: {code: {...}}} — 코스닥 ETF만."""
     cache = load(KRX_FILE)
     key = P._krx_key()
-    todo = [d for d in days if d.strftime("%Y%m%d") not in cache]
+    # 2026-11-02: 반도체·2차전지 패시브와 신규 액티브를 담기 시작 → 그 전에 받은 날은 다시 받는다(대표 패시브 코드로 판별)
+    SENTINEL = ("396500", "305720")   # TIGER 반도체TOP10, KODEX 2차전지산업
+    todo = [d for d in days if d.strftime("%Y%m%d") not in cache
+            or not all(s in cache[d.strftime("%Y%m%d")] for s in SENTINEL)]
     print(f"[KRX] 총 {len(days)}일 중 신규 {len(todo)}일 수집")
     for d in todo:
         ymd = d.strftime("%Y%m%d")
@@ -54,7 +57,8 @@ def collect_krx(days):
         for it in items:
             nm = it.get("ISU_NM", "")
             code = it.get("ISU_CD", "")
-            keep = (code in TRACKED) or ("코스닥" in nm and not any(x in nm for x in EXC))
+            from universe import passive_kind
+            keep = (code in TRACKED) or ("코스닥" in nm and not any(x in nm for x in EXC)) or bool(passive_kind(nm))
             if not keep: continue
             def num(k):
                 try: return float(str(it.get(k, "0")).replace(",", "") or 0)
