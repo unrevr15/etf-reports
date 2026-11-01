@@ -23,6 +23,15 @@ def stock_names():
     for eid in raw:
         for ymd in raw[eid]:
             names.update(raw[eid][ymd].keys())
+    # 2026-11-02: 주간 테마 그림은 일일 스냅샷의 코스닥 그룹 ETF를 쓴다 → 그 종목도 업종 조회
+    sys.path.insert(0, os.path.dirname(HERE))
+    import pdf_change as P
+    snap = load(os.path.join(os.path.dirname(HERE), "snapshots.json"))
+    for e in P.ETFS:
+        if e.get("grp") != "kosdaq": continue
+        d = snap.get(f"{e['am']}:{e['id']}", {})
+        for ymd in sorted(d)[-20:]:
+            names.update((d[ymd] or {}).keys())
     return sorted(names)
 
 def naver_code(nm):
