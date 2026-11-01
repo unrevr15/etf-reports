@@ -1048,17 +1048,30 @@ def _prev_key(kk, t_ymd, max_gap=10):
     return pk if gap <= max_gap else None
 
 def _fetch(e, ymd, tries=3):
-    """모드 무관 통일 호출 → (map, 기준일YYYYMMDD). 일시적 네트워크 오류는 재시도."""
+    """모드 무관 통일 호출 → (map, 기준일YYYYMMDD). 일시적 네트워크 오류는 재시도.
+    경로 무관 당일분(2026-11-02 사용자 '올라오는대로 경로 무관히'): 운용사 원본이 요청일 PDF를 아직 안 주면
+    FunETF를 보고, FunETF가 '요청일과 같은 날짜'일 때만 그것을 쓴다(어제 것으로 대체하지 않음).
+    실측: SOL·WON·ACE 원본은 08:14~08:40 게시, FunETF는 07:30에 같은 내용(종목명·수량 일치)으로 뜬다."""
     import time
-    last = None
+    last = None; res = None
     for i in range(tries):
         try:
-            if e["mode"] == "dateapi":
-                return e["fetch"](e["id"], ymd)
-            return e["fetch"](e["id"])  # snapshot: ymd 무시, 최신 반환
+            res = e["fetch"](e["id"], ymd) if e["mode"] == "dateapi" else e["fetch"](e["id"])  # snapshot: 최신 반환
+            break
         except Exception as ex:
             last = ex
             if i < tries - 1: time.sleep(1.5 * (i + 1))
+    if res and res[0] and res[1] == ymd:
+        return res
+    try:
+        fm, fd = fetch_funetf(krx_isin(e["krx"]), key=e["id"]) if e.get("krx") else ({}, "")
+    except Exception:
+        fm, fd = {}, ""
+    if fm and fd == ymd:
+        print(f"  [경로] {e['name']}: 원본 {(res[1] if res else '') or '미게시'} → FunETF 당일분 {fd} 사용", flush=True)
+        return fm, fd
+    if res is not None:
+        return res
     raise last
 
 
