@@ -43,6 +43,26 @@ def is_kosdaq_passive(nm):
 def is_kosdaq_active(code, nm):
     return code in KOSDAQ_ACTIVE_CODES and not any(k in nm for k in ACTIVE_EXCLUDE_KEYWORDS)
 
+# ── 2026-11-02 주간 리포트 4그룹화 ─────────────────────────────
+# 액티브: 일일 리포트와 같은 발송 그룹(P.ETFS 의 grp). PDF 이력은 일일 스냅샷(당일분)에서 읽는다.
+# 패시브: 하나로 묶어 보되 코스닥 / 반도체 / 2차전지 로 구분(국내 종목형, 순자산 300억 이상은 analyze 에서 거른다).
+PASSIVE_MIN_AUM = 300e8
+_PASSIVE_EXC = ("레버리지", "인버스", "선물", "채권", "커버드콜", "혼합", "숏", "액티브", "합성",
+                "미국", "글로벌", "차이나", "중국", "아시아", "일본", "인도", "유럽", "엔비디아", "대만")
+_SECTOR_WORDS = {"반도체": ("반도체",), "2차전지": ("2차전지", "이차전지", "배터리", "전고체", "리튬", "양극재")}
+
+def passive_kind(nm):
+    """국내 패시브 ETF 분류: '코스닥' / '반도체' / '2차전지' / None."""
+    if any(x in nm for x in _PASSIVE_EXC): return None
+    for k, words in _SECTOR_WORDS.items():
+        if any(w in nm for w in words): return k
+    if "코스닥" in nm: return "코스닥"
+    return None
+
+def active_groups():
+    """[(그룹키, 라벨, [ETF dict...])] — 일일 리포트 발송 그룹 순서."""
+    return [(k, lab, [e for e in P.ETFS if e.get("grp") == k]) for k, lab in P.REPORT_GROUPS]
+
 if __name__ == "__main__":
     print("②③ PDF 대상:", [e["name"] for e in ACTIVE_PDF])
     print("① 액티브 코드:", KOSDAQ_ACTIVE_CODES)
