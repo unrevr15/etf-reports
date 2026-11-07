@@ -1138,5 +1138,20 @@
 "code": "114810",
 "sector": null,
 "market": "KOSDAQ"
+},
+"LIG아큐버": {
+"code": "073490",
+"sector": null,
+"market": "KOSDAQ"
+},
+"래블업": {
+"code": "0147B0",
+"sector": null,
+"market": "KOSDAQ"
+},
+"안랩": {
+"code": "053800",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
