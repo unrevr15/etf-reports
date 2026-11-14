@@ -1153,5 +1153,30 @@
 "code": "053800",
 "sector": null,
 "market": "KOSDAQ"
+},
+"동원파츠": {
+"code": "0162D0",
+"sector": null,
+"market": "KOSDAQ"
+},
+"사피엔반도체": {
+"code": "452430",
+"sector": null,
+"market": "KOSDAQ"
+},
+"아이티켐": {
+"code": "309710",
+"sector": null,
+"market": "KOSDAQ"
+},
+"스튜디오드래곤": {
+"code": "253450",
+"sector": null,
+"market": "KOSDAQ"
+},
+"피엔티": {
+"code": "137400",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
