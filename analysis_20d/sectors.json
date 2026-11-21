@@ -1178,5 +1178,40 @@
 "code": "137400",
 "sector": null,
 "market": "KOSDAQ"
+},
+"다원넥스뷰": {
+"code": "323350",
+"sector": null,
+"market": "KOSDAQ"
+},
+"동국제약": {
+"code": "086450",
+"sector": null,
+"market": "KOSDAQ"
+},
+"에이엘로봇": {
+"code": "471800",
+"sector": null,
+"market": "KOSDAQ"
+},
+"영광와이케이엠씨": {
+"code": "345290",
+"sector": null,
+"market": "KOSDAQ"
+},
+"파수": {
+"code": "150900",
+"sector": null,
+"market": "KOSDAQ"
+},
+"파수AI": {
+"code": "150900",
+"sector": null,
+"market": "KOSDAQ"
+},
+"케이엠더블유": {
+"code": "032500",
+"sector": null,
+"market": "KOSDAQ"
 }
 }
