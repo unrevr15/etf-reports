@@ -172,8 +172,11 @@ def _group_done(ymd, grp):
 def _group_payload(ctx, grp):
     label = P.REPORT_LABEL[grp]
     gs = [g for g in ctx["groups"] if g.get("grp") == grp]
-    status = P.group_status_line(gs)
-    cap = f"{label} ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{status}"
+    status = P.group_status_line(gs)   # 내부 상태줄(캡처 n/N, 전일분, 대기): v2 에서는 로그에만 남긴다
+    if P.img_style() == "v1":
+        cap = f"{label} ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{status}"
+    else:
+        cap = P.group_caption(gs, ctx["today"], label)   # 첫 줄 제목, 둘째 줄 순매수/순매도, 필요할 때만 셋째 줄
     return label, gs, status, cap
 
 def send_group(ctx, grp, dm=None):
@@ -181,6 +184,7 @@ def send_group(ctx, grp, dm=None):
     dm=(토큰, chat) 이면 점검용: 두 형식을 그 DM으로만, 마커 없음."""
     label, gs, status, cap = _group_payload(ctx, grp)
     ymd = ctx["today"].strftime("%Y%m%d")
+    log(f"  [{label}] 상태: {status}")
     for ch, kind, tok_env, chat_env, prefix in CHANNELS:
         try:
             tok, chat = (dm if dm else (os.getenv(tok_env), os.getenv(chat_env)))
@@ -194,7 +198,7 @@ def send_group(ctx, grp, dm=None):
                 continue
             c = (f"[DM 점검 · {ch} 형식]\n" if dm else "") + cap
             ok = (P.send_telegram(pngs, c, token=tok, chat=chat) if pngs
-                  else P.send_text(c + "\n(오늘 구성 변화 없음)", token=tok, chat=chat))
+                  else P.send_text(c + ("\n(오늘 구성 변화 없음)" if P.img_style() == "v1" else ""), token=tok, chat=chat))
             log(f"  [{ch}·{label}] {'사진 %d장' % len(pngs) if pngs else '텍스트(변화 없음)'} → {'완료' if ok else '실패'}")
             if not ok and not dm:
                 _FAILS[(ch, grp)] = _FAILS.get((ch, grp), 0) + 1
@@ -220,7 +224,7 @@ def wait_and_send(ctx, today):
     t0 = datetime.datetime.now()
     while True:
         todo = [k for k in keys if not _group_done(ymd, k)]
-        for k in todo:
+        for k in todo:   # keys 순서 = 코스닥, 반도체, 바이오, ESS. 같은 회차에 여럿이 준비되면 이 순서로 나간다(준비 안 된 그룹을 기다리지 않음)
             st = _send_state(ctx, k)
             if _can_send(st):
                 if st["deg_hit"]:
