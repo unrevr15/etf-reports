@@ -7,7 +7,7 @@
 스냅샷은 snapshots.json 에 {etf_key:{YYYYMMDD:{종목:수량}}} 누적.
 curl 차단 사이트(PLUS/UNICORN/RISE/DB)는 헤드드 Selenium fetcher로 추가 예정(PC 켜둠).
 """
-import sys, os, csv, json, requests
+import sys, os, csv, json, time, requests
 from datetime import datetime, date, timedelta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -51,14 +51,104 @@ def save_snap(s):
     json.dump(s, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
     os.replace(tmp, SNAP_FILE)
 
+# ── 중계(릴레이): 러너(해외 IP)가 막힌 FunETF, KoAct 를 국내 NCP 가 대신 받아 워커에 맡겨 둔 것을 읽는다 (2026-11-25) ──
+# 11-24 부터 GitHub 러너가 FunETF 에서 403, 11-20 부터 KoAct 가 JSON 이 아닌 응답. 워커 /api/ingest/etfpdf:
+#   POST {"op":"want","ymd","items":[{"src","id"}]}  = 러너가 '이것 좀 받아 달라'고 적는다(실행당 한 번씩)
+#   GET  ?src=&id=&ymd=                               = NCP 가 올려 둔 원본(payload)을 읽는다
+# DASHBOARD_URL/DASHBOARD_TOKEN 이 없으면 조용히 건너뛰고, 어떤 실패도 예외를 내지 않는다(워커 문제는 예전 동작 그대로).
+_RELAY_WANTED = set()     # 이번 실행에서 want 를 이미 보낸 (src, id, ymd)
+_RELAY_DOWN = False       # 워커 호출이 한 번 실패하면 이번 실행 동안 더 부르지 않는다(5초씩 낭비 방지)
+_RELAY_TIMEOUT = 5
+_RELAY_MISS = {}          # (src, id, ymd) -> 이 시각(time.time)까지는 '중계에 없음'으로 보고 다시 묻지 않는다(헛 GET 수백 번 방지)
+_RELAY_MISS_TTL = 60
+_RELAY_DOWN_CODES = (401, 403, 404)   # 토큰 거절 또는 라우트 없음: 이번 실행 동안 중계를 접는다(예외와 같은 취급)
+
+def _today_kst():
+    from datetime import timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y%m%d")
+
+def _relay_conf():
+    url = (os.getenv("DASHBOARD_URL") or "").rstrip("/")
+    tok = os.getenv("DASHBOARD_TOKEN") or ""
+    return (url + "/api/ingest/etfpdf", tok) if url and tok else None
+
+def _relay_hdr(tok):
+    # Cloudflare 가 기본 UA 를 막는 일이 있어 dashboard_push 와 같은 UA 를 쓴다
+    return {"X-Ingest-Token": tok, "Content-Type": "application/json",
+            "User-Agent": "etf-total/1.0 (+dashboard-ingest)"}
+
+def _relay_want(src, ident, ymd):
+    global _RELAY_DOWN
+    k = (src, str(ident), ymd)
+    if _RELAY_DOWN or k in _RELAY_WANTED: return
+    cf = _relay_conf()
+    if not cf: return
+    _RELAY_WANTED.add(k)
+    try:
+        r = requests.post(cf[0], headers=_relay_hdr(cf[1]), timeout=_RELAY_TIMEOUT,
+                          data=json.dumps({"op": "want", "ymd": ymd, "items": [{"src": src, "id": str(ident)}]}))
+        if r.status_code != 200:
+            print(f"  [중계] want HTTP {r.status_code} ({src} {ident})", flush=True)
+            if r.status_code in _RELAY_DOWN_CODES:
+                _RELAY_DOWN = True
+                print("  [중계] 토큰 거절 또는 라우트 없음 → 이번 실행에선 중계 안 씀", flush=True)
+    except Exception as ex:
+        _RELAY_DOWN = True
+        print(f"  [중계] 워커 호출 실패({type(ex).__name__}) → 이번 실행에선 중계 안 씀", flush=True)
+
+def _relay_get(src, ident, ymd):
+    """워커에 맡겨 둔 payload 또는 None. 어떤 실패도 None."""
+    global _RELAY_DOWN
+    cf = _relay_conf()
+    if _RELAY_DOWN or not cf: return None
+    mk = (src, str(ident), ymd)
+    if _RELAY_MISS.get(mk, 0) > time.time(): return None      # 방금 없다고 들은 항목은 60초 동안 다시 묻지 않는다
+    try:
+        r = requests.get(cf[0], params={"src": src, "id": str(ident), "ymd": ymd},
+                         headers=_relay_hdr(cf[1]), timeout=_RELAY_TIMEOUT)
+        if r.status_code in _RELAY_DOWN_CODES:
+            _RELAY_DOWN = True
+            print(f"  [중계] 워커 HTTP {r.status_code} → 이번 실행에선 중계 안 씀", flush=True)
+            return None
+        if r.status_code != 200: return None
+        item = (r.json() or {}).get("item")
+        pl = item.get("payload") if isinstance(item, dict) else None
+        if isinstance(pl, (dict, list)):
+            _RELAY_MISS.pop(mk, None)
+            return pl
+        _RELAY_MISS[mk] = time.time() + _RELAY_MISS_TTL      # 200 인데 item 없음 = 단순 미스(다운 아님)
+        return None
+    except Exception as ex:
+        _RELAY_DOWN = True
+        print(f"  [중계] 워커 읽기 실패({type(ex).__name__}) → 이번 실행에선 중계 안 씀", flush=True)
+        return None
+
 # ── fetcher: 삼성액티브(KoAct) 날짜 API → {종목:수량}, 기준일 ──
+_KOACT_LOGGED = False   # 비JSON 응답 진단 로그는 실행당 한 번
+
 def fetch_samsungactive(prod_id, ymd):
+    global _KOACT_LOGGED
     g = f"{ymd[:4]}.{ymd[4:6]}.{ymd[6:]}"
     r = requests.get(f"https://www.samsungactive.co.kr/api/v1/product/etf-pdf/{prod_id}.do",
                      params={"gijunYMD": g},
                      headers={"User-Agent": UA, "Referer": f"https://www.samsungactive.co.kr/etf/view.do?id={prod_id}"},
                      timeout=20)
-    d = r.json().get("pdf", {})
+    try:
+        js = r.json()
+    except ValueError:
+        if not _KOACT_LOGGED:
+            _KOACT_LOGGED = True
+            body = " ".join(str(getattr(r, "text", "") or "")[:120].split())
+            print(f"  [KoAct] JSON 아님 → HTTP {r.status_code} type={r.headers.get('Content-Type')} body={body!r}", flush=True)
+        _relay_want("koact", prod_id, ymd)
+        js = _relay_get("koact", prod_id, ymd)
+        if not isinstance(js, dict): raise      # 중계에도 없으면 예전과 같게 예외(_fetch 의 재시도와 실패 처리로 넘어감)
+        print(f"  [KoAct {prod_id}] 중계에서 {ymd} 받음", flush=True)
+    return _samsung_parse(js, prod_id)
+
+def _samsung_parse(js, prod_id):
+    """KoAct API 응답(JSON 객체) -> ({종목:[수량,단가]}, 기준일). 직접 응답과 중계 payload 가 같은 코드를 탄다."""
+    d = js.get("pdf", {})
     actual = str(d.get("gijunYMD", "")).replace(".", "")
     _CASH_CACHE.pop((prod_id, actual), None)   # 현금은 요청일이 아니라 실제 기준일로(재조회 시 누적 방지)
     out = {}
@@ -429,7 +519,13 @@ _FUNETF_DOWN = False
 _FUNETF_ALIAS = {"네이버": "NAVER", "LG씨앤에스": "LG씨엔에스"}   # FunETF만 한글로 쓰는 종목명 → KRX·운용사 표기(2026-10-29 DAISHIN 대조에서 발견)
 
 def fetch_funetf(isin, key=None):
-    """FunETF 상품 페이지 → ({종목: [1CU수량, 단가]}, PDF기준일). 원화현금 행은 key(기본 isin)의 1CU 현금으로 기록."""
+    """FunETF 상품 페이지 → ({종목: [1CU수량, 단가]}, PDF기준일). 원화현금 행은 key(기본 isin)의 1CU 현금으로 기록.
+    직접 접속이 막히면(러너 403 등) 워커 중계분(NCP 가 국내 IP 로 받아 둔 것)을 같은 파서로 읽는다."""
+    fm, fd = _funetf_live(isin, key)
+    if fm: return fm, fd
+    return _funetf_relay(isin, key)
+
+def _funetf_live(isin, key=None):
     global _FUNETF_DOWN
     import re
     if _FUNETF_DOWN: return {}, ""
@@ -445,6 +541,10 @@ def fetch_funetf(isin, key=None):
         _FUNETF_DOWN = True
         print(f"  [FunETF] 접속 실패({type(ex).__name__}) → 이번 실행에선 건너뜀", flush=True)
         return {}, ""
+    if r.status_code != 200 and r.status_code != 429:      # 403 등: 러너 IP 차단. 이번 실행 동안 더 두드리지 않는다(402회 호출 방지)
+        _FUNETF_DOWN = True
+        print(f"  [FunETF] HTTP {r.status_code} → 이번 실행에선 건너뜀(중계 사용)", flush=True)
+        return {}, ""
     d = re.findall(r"etfPdfYmd\s*=\s*['\"]?(\d{8})", r.text)
     m = re.search(r"setPdfChart\(\s*(\[.*?\])\s*\)", r.text, re.S)
     if r.status_code != 200 or not d or not m:
@@ -452,7 +552,21 @@ def fetch_funetf(isin, key=None):
         return {}, ""
     try: rows = json.loads(m.group(1))
     except ValueError: return {}, ""
-    ymd, key = d[0], (key or isin)
+    return _funetf_parse(rows, d[0], key or isin)
+
+def _funetf_relay(isin, key=None):
+    today = _today_kst()
+    _relay_want("funetf", isin, today)
+    pl = _relay_get("funetf", isin, today)
+    if not isinstance(pl, dict): return {}, ""
+    rows, ymd = pl.get("chart"), str(pl.get("ymd") or "")
+    if not isinstance(rows, list) or not (len(ymd) == 8 and ymd.isdigit()): return {}, ""
+    out, ymd = _funetf_parse(rows, ymd, key or isin)
+    if out: print(f"  [FunETF {isin}] 중계에서 받음(기준일 {ymd})", flush=True)
+    return out, ymd
+
+def _funetf_parse(rows, ymd, key):
+    """setPdfChart 배열 -> ({종목:[수량,단가]}, 기준일). 직접 페이지와 중계 payload 가 같은 코드를 탄다."""
     _CASH_CACHE.pop((key, ymd), None)        # 같은 날짜를 여러 번 받아도(대기 폴링·주간) 현금이 누적되지 않게
     out = {}
     for it in rows:
