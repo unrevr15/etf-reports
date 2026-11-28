@@ -174,7 +174,7 @@ def _group_payload(ctx, grp):
     gs = [g for g in ctx["groups"] if g.get("grp") == grp]
     status = P.group_status_line(gs)   # 내부 상태줄(캡처 n/N, 전일분, 대기): v2 에서는 로그에만 남긴다
     if P.img_style() == "v1":
-        cap = f"{label} ETF PDF 변화  {ctx['today']:%Y-%m-%d}\n{status}"
+        cap = f"{label} ETF PDF 변화 {P._md(ctx['today'])}\n{status}"
     else:
         cap = P.group_caption(gs, ctx["today"], label)   # 첫 줄 제목, 둘째 줄 순매수/순매도, 필요할 때만 셋째 줄
     return label, gs, status, cap

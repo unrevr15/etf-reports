@@ -879,7 +879,7 @@ def fetch_sol(fund_cd, ymd):
 # ── 발송 그룹 ─────────────────────────────────────────────────
 # 2026-10-29 사용자 요청: 아침 리포트를 4개로 나눠 각각 보낸다(채널마다 그룹별 사진 1장씩, 길면 그 그룹만 앨범).
 # ETFS 의 "grp" 로 소속을 정한다. 그룹마다 따로 완결 판정·발송하므로 한 그룹이 늦어도 다른 그룹은 먼저 나간다.
-REPORT_GROUPS = [("kosdaq", "코스닥 액티브"), ("semi", "반도체 액티브"), ("bio", "바이오 액티브"), ("ess", "ESS·2차전지 액티브")]
+REPORT_GROUPS = [("kosdaq", "코스닥 액티브"), ("semi", "반도체 액티브"), ("bio", "바이오 액티브"), ("ess", "ESS 2차전지 액티브")]   # 공통 틀(11-27): 제목에 가운뎃점 금지
 REPORT_LABEL = dict(REPORT_GROUPS)
 
 def short_name(name):
@@ -1747,11 +1747,16 @@ def img_style():
     return "v1" if os.environ.get("PDF_IMG_STYLE", "v2").strip().lower() == "v1" else "v2"
 
 V2_W = 1080
-V2_BODY, V2_HEAD, V2_TITLE = 42, 36, 48
-V2_ROW_H, V2_HEAD_H, V2_BAND_H, V2_TITLE_H, V2_GAP, V2_GRP_H, V2_PAD = 68, 60, 118, 84, 14, 62, 14
+V2_M = 24          # 공통 틀(11-27): 캔버스 바깥 여백 네 변 24px. 표는 V2_M ~ V2_W-V2_M 안쪽에만 그린다
+V2_IW = V2_W - 2 * V2_M   # 표 폭 1032
+V2_BODY, V2_HEAD, V2_TITLE = 42, 38, 48   # 3판: 머리 글자 38px, 오른쪽 여백 14
+V2_ROW_H, V2_HEAD_H, V2_BAND_H, V2_TITLE_H, V2_GAP, V2_GRP_H, V2_PAD = 68, 64, 118, 108, 14, 62, 14   # V2_TITLE_H = 위 여백 24 포함 제목 줄 높이
 V2_BAND_LINE = 46   # ETF 띠: 1줄째 이름(굵게), 2줄째 순자산,현금. 줄 간격. 이름이 폭을 넘을 때만 이름 줄이 늘어난다(줄마다 +46)
 V2_TITLE_LINE = 56  # 제목 줄이 두 줄이 될 때 더해지는 높이(날짜가 둘째 줄)
 V2_CONT = " (이어짐)"   # 행 단위로 쪼갠 뒤 조각의 그룹 줄 표시(소계는 첫 조각에만)
+V2_PADN = 14; V2_PADL = 4        # 숫자 칸 좌우 여백. 숫자 칸 폭은 내용(머리 글자 포함) + 2*V2_PADN 으로 정하고 나머지를 종목 칸이 갖는다(겹침 방지)
+V2_NAME_PADR = 6    # 종목 칸 오른쪽 여백(이름이 이 안에 들어가게 줄바꿈)
+V2_ROW_LINE = 46    # 긴 종목명이 두 줄이 될 때 줄 간격, 행 높이는 줄마다 +46
 V2_BAND_GAP = 30    # 띠 2줄째에서 '순자산 N억' 과 '현금 N억' 사이
 V2_THEMES = {
     "color": dict(bg=(255, 255, 255), head_bg=(31, 56, 100), head_fg=(255, 255, 255), band_bg=(214, 224, 240),
@@ -1763,7 +1768,7 @@ V2_THEMES = {
 }
 V2_HEADS = ["종목", "증감(주)", "금액(억)", "비중전(%)", "비중후(%)"]
 V2_ORDER = ("신규 편입", "재편입", "매수", "편출", "매도")
-MAX_PART_PX_V2 = 8000   # 텔레그램 사진 가로+세로 ≤ 10000px. ETF 블록 단위로 끊는다.
+MAX_PART_PX_V2 = 1920   # 공통 틀(11-27): 그림 한 장 높이 ≤ 1,920px(폰 한 화면). 넘으면 ETF 블록 단위로, 한 ETF 가 넘으면 행 단위로 나눠 앨범으로 보낸다.
 
 _V2_FONTS = {}
 def _v2_font_files():
@@ -1916,10 +1921,46 @@ def _v2_name_lines(name, f, maxw):
         lines[-1] = lines[-2][-1] + lines[-1]; lines[-2] = lines[-2][:-1]
     return lines
 
+def _v2_row_lines(name, f, maxw):
+    """종목명이 칸에 들어가면 [이름]. 아니면 두 줄: '(' 앞이나 공백에서 끊을 수 있으면 거기서, 아니면 두 줄 폭이 고른 글자 자리에서."""
+    if f.getlength(name) <= maxw:
+        return [name]
+    best = None
+    for pref in (True, False):
+        for p in range(1, len(name)):
+            if pref and not (name[p] == "(" or name[p - 1] == " "):
+                continue
+            a, b = name[:p].rstrip(), name[p:].lstrip()
+            wa, wb = f.getlength(a), f.getlength(b)
+            if wa <= maxw and wb <= maxw and (best is None or max(wa, wb) < best[0]):
+                best = (max(wa, wb), [a, b])
+        if best: return best[1]
+    return _v2_name_lines(name, f, maxw)
+
+def _v2_metrics(gs_list, fb=None, fr=None, fh=None):
+    """표 열 폭과 종목 칸 안 글자 폭. 숫자 칸 = 내용(머리 포함) + 2*V2_PADN, 나머지는 종목 칸. 그림 한 장 안에서 모든 ETF 가 같은 열 폭."""
+    fb = fb or _v2_font(V2_BODY, True); fr = fr or _v2_font(V2_BODY); fh = fh or _v2_font(V2_HEAD, True)
+    num = [fh.getlength(h) for h in V2_HEADS[1:]]
+    for g in gs_list:
+        for glabel, sub, rows in _v2_groups(g):
+            if sub: num[1] = max(num[1], fb.getlength(sub))
+            for r in rows:
+                for i in range(1, len(V2_HEADS)):
+                    num[i - 1] = max(num[i - 1], (fb if i == 2 else fr).getlength(r[i]))
+    cw = [int(x) + V2_PADL + V2_PADN for x in num]
+    cw = [V2_IW - sum(cw)] + cw
+    return cw, cw[0] - V2_PAD - V2_NAME_PADR
+
+def _v2_row_h(name, fb, name_maxw):
+    return V2_ROW_H + V2_ROW_LINE * (len(_v2_row_lines(name, fb, name_maxw)) - 1)
+
+def _v2_block_h(g, fb, name_maxw):
+    return _v2_band_h(g, fb) + sum(V2_GRP_H + sum(_v2_row_h(r[0], fb, name_maxw) for r in rows) for _, _, rows in _v2_groups(g))
+
 def _v2_band_h(g, fb=None):
     """ETF 띠 높이: 기본 V2_BAND_H(이름 1줄 + 순자산,현금 1줄). 이름이 줄바꿈될 때만 줄마다 더한다."""
     fb = fb or _v2_font(V2_BODY, True)
-    return V2_BAND_H + V2_BAND_LINE * (len(_v2_name_lines(_chunk_name(g), fb, V2_W - 2 * V2_PAD)) - 1)
+    return V2_BAND_H + V2_BAND_LINE * (len(_v2_name_lines(_chunk_name(g), fb, V2_IW - 2 * V2_PAD)) - 1)
 
 def _render_v2(groups, today, prev, title, out_png, part, label, theme, min_w=None):   # min_w 는 옛 호출 호환용(무시): 폭은 항상 V2_W
     from PIL import Image, ImageDraw
@@ -1930,85 +1971,81 @@ def _render_v2(groups, today, prev, title, out_png, part, label, theme, min_w=No
     fb, fr, fh, ft = _v2_font(V2_BODY, True), _v2_font(V2_BODY), _v2_font(V2_HEAD, True), _v2_font(V2_TITLE, True)
     blocks = [(g, _v2_groups(g)) for g in caps]
     nc = len(V2_HEADS)
-    need = [fh.getlength(h) for h in V2_HEADS]
-    for g, gs in blocks:
-        for glabel, sub, rows in gs:
-            need[0] = max(need[0], fb.getlength(glabel.replace(V2_CONT, "")))   # 이어짐 표시는 소계 칸이 비어 있어 이름 칸 밖으로 나가도 된다
-            for r in rows:
-                need[0] = max(need[0], fb.getlength(r[0]))
-                for i in range(1, nc): need[i] = max(need[i], (fb if i == 2 else fr).getlength(r[i]))
-    right = f"{_md(today)}  vs  {_md(prev)}"
-    mark = f" ({part[0]}/{part[1]})" if part else ""
+    cw, name_maxw = _v2_metrics(caps, fb, fr, fh)
+    right = _md(today)   # 4판: 날짜는 한 날짜 "M/D" (전영업일 비교 표시 없음)
+    mark = f" ({part[0]}/{part[1]})" if (part and part[0] > 1) else ""   # 공통 틀: 둘째 장부터 제목 뒤에 (2/3)
     # 제목은 한 줄이 원칙(모든 이미지 같은 모양). 긴 그룹 이름(ESS)이나 (i/n) 표시로 안 들어가면 '액티브', 'ETF' 를 빼 본다.
     # 글자는 줄이지 않는다. 그래도 안 들어갈 때만(아주 드묾) 날짜를 둘째 줄로 내린다.
-    cands = [title] if title else [f"{label} ETF PDF 변화{mark}", f"{label} PDF 변화{mark}",
-                                   f"{label.replace(' 액티브', '')} PDF 변화{mark}"]
-    left = next((c for c in cands if ft.getlength(c) + 40 + ft.getlength(right) <= V2_W - 2 * PAD), cands[0])
-    base = [x + 2 * PAD for x in need]
-    # 폭은 항상 1080(글자를 줄이지도, 폭을 넓히지도 않는다). ETF 띠는 이름 1줄 + 순자산,현금 1줄이라 폭이 모자라지 않는다.
-    # 표 열은 내용 폭에서 시작해 남는 폭을 열마다 나눠 갖는다. 내용이 1080 을 넘으면(드문 경우) 칸 여백만 줄이고 알린다.
-    W = V2_W
+    # 3판: 네 그룹이 한 패턴 "{그룹} ETF PDF 변화(n/n)". 그룹 이름만 줄인다('액티브' 뺌). 패턴 자체는 줄이지 않는다.
+    # 4판: 날짜가 짧아져(M/D) 그룹 이름 전체("코스닥 액티브")가 들어간다. 안 들어가는 드문 경우만 '액티브'를 뺀다(패턴은 유지).
+    def _cands(m): return [title] if title else [f"{label} ETF PDF 변화{m}", f"{label.replace(' 액티브', '')} ETF PDF 변화{m}"]
+    # 앨범은 장마다 제목 글이 같아야 한다: 가장 긴 표시 (n/n) 로 후보를 골라 그 번호의 후보를 쓴다.
+    wide_mark = f" ({part[1]}/{part[1]})" if part else ""
+    ci = next((i for i, c in enumerate(_cands(wide_mark)) if ft.getlength(c) + 40 + ft.getlength(right) <= V2_IW), 0)
+    cands = _cands(mark); left = cands[ci]
+    # 폭은 항상 1080 캔버스(글자를 줄이지 않는다). 표는 사방 V2_M 안쪽 V2_IW 폭. 열 폭은 _v2_metrics.
+    W = V2_W; X0 = V2_M; X1 = V2_W - V2_M   # 표는 X0 ~ X1-1 (폭 V2_IW), 사방 여백 V2_M
     # 위 후보 어느 것도 한 줄에 안 들어가면 날짜를 둘째 줄로 내린다.
-    two = ft.getlength(left) + 40 + ft.getlength(right) > W - 2 * PAD
+    two = ft.getlength(left) + 40 + ft.getlength(right) > V2_IW
     TH = V2_TITLE_H + (V2_TITLE_LINE if two else 0)
-    extra = W - sum(base)
-    if extra < 0:
-        print(f"  [이미지] 표 내용이 폭 {W}px 보다 {-extra}px 넓어 칸 여백을 줄임")
-    cw = [int(x + extra / nc) for x in base]; cw[0] += W - sum(cw)
-    xs = [0]
+    if cw[0] < 300:
+        print(f"  [이미지] 종목 칸이 {cw[0]}px 로 좁음(숫자 칸이 넓음)")
+    xs = [X0]
     for x in cw: xs.append(xs[-1] + x)
-    H = TH + V2_HEAD_H + sum(_v2_band_h(g, fb) + sum(V2_GRP_H + V2_ROW_H * len(rows) for _, _, rows in gs)
-                                     for _, gs in blocks) + V2_GAP * (len(blocks) - 1) + 4
+    H = TH + V2_HEAD_H + sum(_v2_block_h(g, fb, name_maxw) for g, _ in blocks) + V2_GAP * (len(blocks) - 1) + V2_M + 1
     im = Image.new("RGB", (W, H), T["bg"]); d = ImageDraw.Draw(im)
     def bl(y0, y1, f): return (y0 + y1) / 2 + _v2_base_off(f)   # 잉크 세로 중앙 = 칸 중앙(글꼴 측정값)
     def cell(i, y0, y1, s, f, fill):
         if i == 0: d.text((xs[0] + PAD, bl(y0, y1, f)), s, font=f, fill=fill, anchor="ls")
-        else: d.text((xs[i + 1] - PAD, bl(y0, y1, f)), s, font=f, fill=fill, anchor="rs")
+        else: d.text((xs[i + 1] - V2_PADN, bl(y0, y1, f)), s, font=f, fill=fill, anchor="rs")
     def sign(s): return T["red"] if s.startswith("+") else T["blue"] if s.startswith("-") and len(s) > 1 else T["fg"]
-    d.text((PAD, bl(0, V2_TITLE_H, ft)), left, font=ft, fill=T["title_fg"], anchor="ls")
+    d.text((X0, bl(V2_M, V2_TITLE_H, ft)), left, font=ft, fill=T["title_fg"], anchor="ls")   # 제목 줄: 위 여백 V2_M 아래 칸의 세로 중앙
     if two:
-        d.text((PAD, bl(V2_TITLE_LINE, V2_TITLE_H + V2_TITLE_LINE, ft)), right, font=ft, fill=T["title_fg"], anchor="ls")
+        d.text((X0, bl(V2_M + V2_TITLE_LINE, V2_TITLE_H + V2_TITLE_LINE, ft)), right, font=ft, fill=T["title_fg"], anchor="ls")
     else:
-        d.text((W - PAD, bl(0, V2_TITLE_H, ft)), right, font=ft, fill=T["title_fg"], anchor="rs")
+        d.text((X1, bl(V2_M, V2_TITLE_H, ft)), right, font=ft, fill=T["title_fg"], anchor="rs")
     y = TH
-    d.rectangle([0, y, W, y + V2_HEAD_H], fill=T["head_bg"])
+    d.rectangle([X0, y, X1 - 1, y + V2_HEAD_H], fill=T["head_bg"])
     for i, h in enumerate(V2_HEADS): cell(i, y, y + V2_HEAD_H, h, fh, T["head_fg"])
     y += V2_HEAD_H
     for bi, (g, gs) in enumerate(blocks):
         if bi: y += V2_GAP
         top = y
-        nl = _v2_name_lines(_chunk_name(g), fb, W - 2 * PAD)
+        nl = _v2_name_lines(_chunk_name(g), fb, V2_IW - 2 * PAD)
         bh = V2_BAND_H + V2_BAND_LINE * (len(nl) - 1)
-        d.rectangle([0, y, W, y + bh], fill=T["band_bg"])
+        d.rectangle([X0, y, X1 - 1, y + bh], fill=T["band_bg"])
         c0 = y + 36   # 1줄째 중앙. 줄 중앙은 V2_BAND_LINE 간격(맨 아래 여백 16px)
         for k, ln in enumerate(nl):   # 이름: 굵게. 폭을 넘는 이름만 여러 줄
-            d.text((PAD, c0 + V2_BAND_LINE * k + _v2_base_off(fb)), ln, font=fb, fill=T["band_fg"], anchor="ls")
+            d.text((xs[0] + PAD, c0 + V2_BAND_LINE * k + _v2_base_off(fb)), ln, font=fb, fill=T["band_fg"], anchor="ls")
         i1, i2 = _v2_info(g)   # 2줄째: 순자산, 현금. 보통 굵기, 회색, 이름 밑 왼쪽 정렬
         cy = c0 + V2_BAND_LINE * len(nl) + _v2_base_off(fr)
-        d.text((PAD, cy), i1, font=fr, fill=T["sub"], anchor="ls")
-        d.text((PAD + fr.getlength(i1) + V2_BAND_GAP, cy), i2, font=fr, fill=T["sub"], anchor="ls")
+        d.text((xs[0] + PAD, cy), i1, font=fr, fill=T["sub"], anchor="ls")
+        d.text((xs[0] + PAD + fr.getlength(i1) + V2_BAND_GAP, cy), i2, font=fr, fill=T["sub"], anchor="ls")
         y += bh
         hlines = [y]; vsegs = []
         for glabel, sub, rows in gs:
-            d.rectangle([0, y, W, y + V2_GRP_H], fill=T["grp_bg"])
+            d.rectangle([X0, y, X1 - 1, y + V2_GRP_H], fill=T["grp_bg"])
             cell(0, y, y + V2_GRP_H, glabel, fb, T["fg"])
             if sub: cell(2, y, y + V2_GRP_H, sub, fb, sign(sub))
             y += V2_GRP_H; hlines.append(y); y0 = y
             for ri, r in enumerate(rows):
-                if ri % 2 == 1: d.rectangle([0, y, W, y + V2_ROW_H], fill=T["stripe"])
-                cell(0, y, y + V2_ROW_H, r[0], fb, T["fg"])
+                nl_ = _v2_row_lines(r[0], fb, name_maxw); rh = V2_ROW_H + V2_ROW_LINE * (len(nl_) - 1)
+                if ri % 2 == 1: d.rectangle([X0, y, X1 - 1, y + rh], fill=T["stripe"])
+                for k, ln_ in enumerate(nl_):   # 긴 종목명은 두 줄(줄 간격 V2_ROW_LINE), 행 가운데 정렬
+                    mid = y + rh / 2 + (k - (len(nl_) - 1) / 2) * V2_ROW_LINE
+                    d.text((xs[0] + PAD, mid + _v2_base_off(fb)), ln_, font=fb, fill=T["fg"], anchor="ls")
                 for i in range(1, nc):
                     if i == 2: col = T["sub"] if r[5] else sign(r[i])
                     elif i == 1: col = sign(r[i])
                     else: col = T["sub"] if r[i] == "-" else T["fg"]
-                    cell(i, y, y + V2_ROW_H, r[i], fb if i == 2 else fr, col)
-                y += V2_ROW_H; hlines.append(y)
+                    cell(i, y, y + rh, r[i], fb if i == 2 else fr, col)
+                y += rh; hlines.append(y)
             vsegs.append((y0, y))
-        d.rectangle([0, top, W - 1, y - 1], outline=T["grid"], width=2)
-        for hy in hlines: d.line([0, hy, W, hy], fill=T["grid"], width=1)
+        d.rectangle([X0, top, X1 - 1, y - 1], outline=T["grid"], width=1)   # 공통 틀: 칸 선 1px
+        for hy in hlines: d.line([X0, hy, X1 - 1, hy], fill=T["grid"], width=1)
         for a, b in vsegs:
             for xx in xs[1:-1]: d.line([xx, a, xx, b], fill=T["grid"], width=1)
-    im = im.crop((0, 0, W, y + 4))
+    im = im.crop((0, 0, W, y + 1 + V2_M))   # 마지막 칸 선(y 줄) 아래로 여백 V2_M 줄
     os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
     im.save(out_png)
     return out_png
@@ -2032,19 +2069,37 @@ def render_report_image_mobile(groups, today, prev, status_line="", title=None,
 
 def _v2_chunk_oversized(caps, max_px, base_px):
     """한 장 상한보다 큰 ETF 하나를 행 단위로 고르게 쪼갠다. 조각마다 띠(이름 (i/n))를 반복하고,
-    이어지는 그룹은 같은 그룹 줄(소계는 전체 그대로)을 다시 그린다."""
+    이어지는 그룹은 같은 그룹 줄(소계는 전체 그대로)을 다시 그린다.
+    조각 높이는 띠 + (조각 안 그룹마다 그룹 줄) + 행으로 정확히 센다(1,920px 상한에서는 한 조각에 그룹이 여럿 걸쳐 그룹 줄 값이 크다).
+    먼저 상한까지 채워 조각 수를 정하고, 같은 조각 수가 되는 가장 낮은 높이 한도를 이분탐색으로 찾아 높이를 고르게 한다."""
     out = []
     for g in caps:
         if base_px + _est_px_v2([g]) <= max_px:
             out.append(g); continue
         gs = _v2_groups(g)
-        room = max_px - base_px - _v2_band_h(g)
-        per = max(1, (room - V2_GRP_H) // V2_ROW_H)
+        bh = _v2_band_h(dict(g, chunk=(9, 9)))
+        fb_ = _v2_font(V2_BODY, True); _, nm_ = _v2_metrics([g])   # ETF 전체 기준 열 폭(조각은 같거나 더 넓은 종목 칸 → 추정은 안전 쪽)
         flat = [(gi, r) for gi, (_, _, rows) in enumerate(gs) for r in rows]
-        c = -(-len(flat) // per); size = -(-len(flat) // c)
+        def pack(limit):
+            pieces, cur, used, last = [], [], bh, None
+            for gi, r in flat:
+                rh = _v2_row_h(r[0], fb_, nm_)
+                need = rh + (V2_GRP_H if gi != last else 0)
+                if cur and used + need > limit:
+                    pieces.append(cur); cur, used, last = [], bh, None
+                    need = rh + V2_GRP_H
+                cur.append((gi, r)); used += need; last = gi
+            pieces.append(cur)
+            return pieces
+        top = max_px - base_px
+        c = len(pack(top)); lo, hi = bh + V2_GRP_H + V2_ROW_H, top   # lo 는 한 행도 안 들어가는 낮은 값(이분탐색 하한)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if len(pack(mid)) <= c: hi = mid
+            else: lo = mid + 1
+        segs = pack(lo)
         pieces = []; seen = set()
-        for i in range(c):
-            seg = flat[i * size:(i + 1) * size]
+        for seg in segs:
             pg = []
             for gi in sorted({gi for gi, _ in seg}):
                 first = gi not in seen   # 앞 조각에서 이미 나온 그룹이면 '이어짐' 표시를 달고 소계는 비운다(전체 소계가 조각마다 되풀이돼 읽히지 않게)
@@ -2057,14 +2112,32 @@ def _v2_chunk_oversized(caps, max_px, base_px):
 
 def _est_px_v2(gs):
     """v2 표 높이(px) 추정: ETF 띠 + 그룹 줄 + 행."""
-    h = 0
-    for g in gs:
-        h += _v2_band_h(g) + sum(V2_GRP_H + V2_ROW_H * len(rows) for _, _, rows in _v2_groups(g))
-    return h + V2_GAP * max(0, len(gs) - 1)
+    fb = _v2_font(V2_BODY, True)
+    _, nm = _v2_metrics(gs)
+    return sum(_v2_block_h(g, fb, nm) for g in gs) + V2_GAP * max(0, len(gs) - 1)
+
+def _v2_split(caps, base_px, max_px):
+    """ETF 블록을 순서대로 묶어 장 수를 최소로 하고(상한 max_px), 같은 장 수가 되는 가장 낮은 높이 한도로 다시 묶어 장마다 높이를 고르게 한다.
+    한 ETF 가 한 장보다 큰 경우는 _v2_chunk_oversized 가 먼저 쪼개 둔 뒤라 없다(그래도 한 장에 하나는 넣는다)."""
+    def pack(limit):
+        parts, cur = [], []
+        for g in caps:
+            if cur and base_px + _est_px_v2(cur + [g]) > limit:
+                parts.append(cur); cur = []
+            cur.append(g)
+        if cur: parts.append(cur)
+        return parts
+    k = len(pack(max_px))
+    lo, hi = base_px, max_px
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if len(pack(mid)) <= k: hi = mid
+        else: lo = mid + 1
+    return pack(lo)
 
 def group_caption(gs, today, label):
     """v2 캡션(공개 채널용). 변화 없음이면 '… 변화 없음'. 내부 상태(캡처 n/N, 대기)는 넣지 않는다(그건 group_status_line, 로그용)."""
-    head = f"{label} ETF PDF 변화  {_md(today)}"
+    head = f"{label} ETF PDF 변화 {_md(today)}"
     caps = [g for g in gs if g["state"] == "captured" and (g["buy"] or g["sell"])]
     pend = [short_name(g["etf"]) for g in gs if g["state"] != "captured"]
     lag = [short_name(g["etf"]) for g in gs if g["state"] == "captured" and g.get("asof")]
@@ -2187,16 +2260,24 @@ def render_report_parts(kind, groups, today, prev, status_line="", label="코스
     caps = [g for g in groups if g["state"] == "captured" and (g["buy"] or g["sell"])]
     if not caps:
         return []
-    if img_style() == "v2":   # 새 표: ETF 블록 단위로만 끊는다(가로 1080 이라 높이 8000px 까지 한 장)
+    if img_style() == "v2":   # 새 표: 높이 1,920px 이하로 ETF 블록 단위, 한 ETF 가 넘으면 행 단위로 끊는다
         render, stem = (render_report_image, "pdf_change") if kind == "wide" else (render_report_image_mobile, "pdf_change_m")
         ymd = today.strftime("%Y%m%d") + (f"_{tag}" if tag else "")
-        base = V2_TITLE_H + V2_TITLE_LINE + V2_HEAD_H + 8
-        pieces = _v2_chunk_oversized(caps, MAX_PART_PX_V2, base)   # 한 장보다 큰 ETF 는 행 단위로
-        parts = _split_caps(pieces, _est_px_v2, base, MAX_PART_PX_V2)
-        if len(parts) == 1:
-            return [render(parts[0], today, prev, status_line, label=label, out_png=os.path.join(BASE, f"{stem}_{ymd}.png"))]
-        return [render(p, today, prev, status_line, part=(i, len(parts)), label=label,
-                       out_png=os.path.join(BASE, f"{stem}_{ymd}_{i}.png")) for i, p in enumerate(parts, 1)]
+        from PIL import Image
+        # 높이 = 제목 줄(위 여백 포함) + 머리 행 + ETF 블록들 + 아래 여백. 제목이 두 줄이 되는 드문 경우(+V2_TITLE_LINE)는
+        # 먼저 한 줄 기준으로 나눠 그려 보고, 한 장이라도 상한을 넘으면 두 줄 기준으로 다시 나눈다.
+        for extra in (0, V2_TITLE_LINE):
+            base = V2_TITLE_H + V2_HEAD_H + V2_M + 1 + extra
+            pieces = _v2_chunk_oversized(caps, MAX_PART_PX_V2, base)   # 한 장보다 큰 ETF 는 행 단위로
+            parts = _v2_split(pieces, base, MAX_PART_PX_V2)            # 장 수 최소, 장마다 높이 고르게
+            if len(parts) == 1:
+                outs = [render(parts[0], today, prev, status_line, label=label, out_png=os.path.join(BASE, f"{stem}_{ymd}.png"))]
+            else:
+                outs = [render(p, today, prev, status_line, part=(i, len(parts)), label=label,
+                               out_png=os.path.join(BASE, f"{stem}_{ymd}_{i}.png")) for i, p in enumerate(parts, 1)]
+            if all(Image.open(o).size[1] <= MAX_PART_PX_V2 for o in outs):
+                break
+        return outs
     if kind == "wide":
         render, est, base, stem = render_report_image, _est_px_wide, 330, "pdf_change"
     else:
